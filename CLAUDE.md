@@ -25,7 +25,10 @@ cada clip pegado a su vídeo:
   capa más arriba. `Track.kind` es `"video"` o `"audio"`; `Track.hidden`
   excluye la pista entera de previsualización/exportación (icono ojo
   en vídeo, altavoz/mute en audio — misma semántica: vídeo oculto
-  también silencia el audio pegado a sus clips).
+  también silencia el audio pegado a sus clips). `Track.name` opcional
+  (editable haciendo clic en el nombre del gutter, `renameTrack` en
+  `core/timeline.ts`) — sin él, la UI muestra un nombre automático
+  ("Vídeo N"/"Audio N" según su posición entre las de su tipo).
 - **Composición de vídeo**: capas opacas. Se recorre `Timeline.tracks`
   de arriba a abajo y se dibuja la primera pista de vídeo no oculta que
   tenga un clip en ese instante (`resolveActiveVideoPosition` en

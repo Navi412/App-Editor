@@ -105,6 +105,8 @@ export interface Track {
   clips: Clip[];
   /** Excluye la pista entera de previsualización/exportación: en vídeo, deja ver las pistas de abajo; en audio, no suena. Icono en la UI: ojo (vídeo) o altavoz/mute (audio) — misma semántica. */
   hidden: boolean;
+  /** Nombre puesto por el usuario. undefined = sin personalizar, la UI muestra un nombre automático ("Vídeo N"/"Audio N") — ver trackDisplayName en ui/main.ts. Ampliación de alcance pedida explícitamente el 2026-08-21. */
+  name?: string;
 }
 
 export interface Resolution {

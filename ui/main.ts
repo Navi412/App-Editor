@@ -16,6 +16,7 @@ import {
   removeClip,
   removeTrack,
   removeVolumeKeyframe,
+  renameTrack,
   resolveActiveVideoPosition,
   setClipAudio,
   setClipColorFilter,
@@ -96,7 +97,6 @@ const trimOutInput = requireElement<HTMLInputElement>("#trim-out");
 const applyTrimButton = requireElement<HTMLButtonElement>("#apply-trim");
 const clipMutedInput = requireElement<HTMLInputElement>("#clip-muted");
 const clipColorFilterSelect = requireElement<HTMLSelectElement>("#clip-color-filter");
-const timelineResizeHandle = requireElement<HTMLDivElement>("#timeline-resize-handle");
 const outputControls = requireElement<HTMLFieldSetElement>("#output-controls");
 const outputWidthInput = requireElement<HTMLInputElement>("#output-width");
 const outputHeightInput = requireElement<HTMLInputElement>("#output-height");
@@ -707,20 +707,31 @@ function splitAtPlayhead(): void {
 
 // --- Timeline visual: zoom/scroll en píxeles, playhead, pistas, arrastrar para mover/recortar ---
 
+/**
+ * Ancho del "gutter" (nombre/ojo-mute/quitar) fijo a la izquierda de
+ * cada fila de pista — ver `.timeline-track-gutter` en styles.css,
+ * debe coincidir con su `flex-basis`. Los segundos (regla), los
+ * marcadores, el playhead y los propios clips se posicionan todos a
+ * partir de este desplazamiento, para que la "zona de tiempo" empiece
+ * justo después de donde están los canales, no se solape con ellos —
+ * pedido explícitamente el 2026-08-21.
+ */
+const TRACK_GUTTER_WIDTH_PX = 178;
+
 function setPlayheadTicks(ticks: number): void {
   playheadTicks = Math.max(0, Math.min(ticks, Math.max(timelineTotalTicks - 1, 0)));
   updatePlayheadPosition();
 }
 
 function updatePlayheadPosition(): void {
-  const left = ticksToSeconds(playheadTicks) * pixelsPerSecond;
+  const left = TRACK_GUTTER_WIDTH_PX + ticksToSeconds(playheadTicks) * pixelsPerSecond;
   timelinePlayhead.style.left = `${Math.round(left)}px`;
 }
 
-/** Ancho total de la línea de tiempo en píxeles: la duración a escala, o el ancho visible si es menor (para que siempre rellene el hueco). */
+/** Ancho de la ZONA DE TIEMPO en píxeles (sin contar el gutter): la duración a escala, o el ancho visible menos el gutter si es menor (para que siempre rellene el hueco). */
 function contentWidthPx(): number {
   const naturalWidth = ticksToSeconds(timelineTotalTicks) * pixelsPerSecond;
-  const viewportWidth = timelineScroll.clientWidth || 1;
+  const viewportWidth = Math.max((timelineScroll.clientWidth || 1) - TRACK_GUTTER_WIDTH_PX, 1);
   return Math.max(naturalWidth, viewportWidth);
 }
 
@@ -729,7 +740,11 @@ function refreshTimelineLayout(): void {
   timelineTotalTicks = timeline ? timelineDurationTicks(timeline) : 0;
   playheadTicks = Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0));
 
-  const width = Math.round(contentWidthPx());
+  // El ancho total incluye el gutter — la regla y la pista de texto
+  // reservan ese mismo hueco con padding-left en CSS (ver
+  // .timeline-ruler/.timeline-text-track), así sus marcas quedan
+  // alineadas en X con los clips (que empiezan tras el gutter de cada fila).
+  const width = Math.round(contentWidthPx()) + TRACK_GUTTER_WIDTH_PX;
   timelineContent.style.width = `${width}px`;
   timelineRuler.style.width = `${width}px`;
   timelineTextTrack.style.width = `${width}px`;
@@ -772,10 +787,14 @@ const scheduleTextTrackRender = throttleToFrame(renderTextTrack);
 function zoomAt(newPixelsPerSecond: number, anchorClientX: number): void {
   if (!timeline) return;
   const scrollRectBefore = timelineScroll.getBoundingClientRect();
-  const anchorSeconds = (anchorClientX - scrollRectBefore.left + timelineScroll.scrollLeft) / pixelsPerSecond;
+  // El gutter no escala con el zoom (ancho fijo en píxeles) — se resta
+  // antes de convertir a segundos y se vuelve a sumar al final, para
+  // que el punto bajo el cursor se quede quieto en pantalla.
+  const anchorSeconds =
+    (anchorClientX - scrollRectBefore.left + timelineScroll.scrollLeft - TRACK_GUTTER_WIDTH_PX) / pixelsPerSecond;
   pixelsPerSecond = Math.max(MIN_PIXELS_PER_SECOND, Math.min(MAX_PIXELS_PER_SECOND, newPixelsPerSecond));
   refreshTimelineLayout();
-  timelineScroll.scrollLeft = anchorSeconds * pixelsPerSecond - (anchorClientX - scrollRectBefore.left);
+  timelineScroll.scrollLeft = anchorSeconds * pixelsPerSecond + TRACK_GUTTER_WIDTH_PX - (anchorClientX - scrollRectBefore.left);
 }
 
 function zoomToFit(): void {
@@ -786,7 +805,7 @@ function zoomToFit(): void {
   // refreshTimelineLayout, que aún no se ha llamado la primera vez).
   const totalTicks = timelineDurationTicks(timeline);
   if (totalTicks <= 0) return;
-  const viewport = timelineScroll.clientWidth || 1;
+  const viewport = Math.max((timelineScroll.clientWidth || 1) - TRACK_GUTTER_WIDTH_PX, 1);
   const seconds = Math.max(ticksToSeconds(totalTicks), 0.001);
   pixelsPerSecond = Math.max(
     MIN_PIXELS_PER_SECOND,
@@ -842,7 +861,7 @@ function renderRuler(): void {
   for (let t = 0; t <= totalSeconds + 1e-6; t += interval) {
     const mark = document.createElement("span");
     mark.className = "ruler-mark";
-    mark.style.left = `${Math.round(t * pixelsPerSecond)}px`;
+    mark.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + t * pixelsPerSecond)}px`;
     mark.textContent = formatRulerTime(t);
     timelineRuler.appendChild(mark);
   }
@@ -880,7 +899,7 @@ function snapTimelineTicks(ticks: number): number {
 
 function ticksAtClientX(clientX: number): number {
   const rect = timelineContent.getBoundingClientRect();
-  const seconds = Math.max(0, (clientX - rect.left) / pixelsPerSecond);
+  const seconds = Math.max(0, (clientX - rect.left - TRACK_GUTTER_WIDTH_PX) / pixelsPerSecond);
   const raw = Math.max(0, Math.min(secondsToTicks(seconds), Math.max(timelineTotalTicks - 1, 0)));
   return snapTimelineTicks(raw);
 }
@@ -1603,22 +1622,44 @@ function renderAudioLaneClips(track: Track, lane: HTMLElement): void {
   }
 }
 
-/** Nombre por defecto de una pista para el gutter — "Vídeo N"/"Audio N" según su posición entre las de su mismo tipo. */
+/** Nombre a mostrar en el gutter: el que haya puesto el usuario (Track.name), o si no "Vídeo N"/"Audio N" según su posición entre las de su mismo tipo. */
 function trackDisplayName(track: Track, allTracks: Track[]): string {
+  if (track.name) return track.name;
   const sameKind = allTracks.filter((t) => t.kind === track.kind);
   const position = sameKind.indexOf(track) + 1;
   return `${track.kind === "video" ? "Vídeo" : "Audio"} ${position}`;
 }
 
-/** Gutter (nombre, ojo/mute, subir/bajar capa, quitar) de la fila principal de una pista. */
+/** Gutter (nombre editable, ojo/mute, subir/bajar capa, quitar) de la fila principal de una pista. */
 function buildTrackGutter(track: Track, allTracks: Track[]): HTMLElement {
   const gutter = document.createElement("div");
   gutter.className = "timeline-track-gutter";
 
-  const name = document.createElement("span");
-  name.className = "track-name";
-  name.textContent = trackDisplayName(track, allTracks);
-  name.title = name.textContent;
+  // Editable directamente (sin botón de "renombrar" aparte, a petición
+  // explícita del usuario del 2026-08-21): un input siempre visible que
+  // parece una etiqueta hasta que se hace foco en él. Una cadena vacía
+  // al confirmar quita el nombre personalizado (vuelve al automático).
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "track-name-input";
+  name.value = trackDisplayName(track, allTracks);
+  name.title = "Haz clic para renombrar la pista";
+  name.addEventListener("pointerdown", (event) => event.stopPropagation());
+  name.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      name.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      name.value = trackDisplayName(track, allTracks);
+      name.blur();
+    }
+  });
+  name.addEventListener("change", () => {
+    if (!timeline) return;
+    commitTimeline(renameTrack(timeline, track.id, name.value));
+    refreshTimelineLayout();
+  });
 
   const toggle = document.createElement("button");
   toggle.type = "button";
@@ -1691,6 +1732,57 @@ function buildTrackSubGutter(): HTMLElement {
   return gutter;
 }
 
+const DEFAULT_VIDEO_LANE_HEIGHT_PX = 64;
+const DEFAULT_AUDIO_LANE_HEIGHT_PX = 36;
+const MIN_LANE_HEIGHT_PX = 20;
+
+/**
+ * Alturas de fila elegidas a mano, por fila — clave `trackId` para la
+ * fila principal, `${trackId}:audio` para la de audio pegado de un
+ * vídeo. Vive fuera de /core: es una preferencia de la UI de esta
+ * sesión, no datos del proyecto (igual que pixelsPerSecond).
+ */
+const rowHeights = new Map<string, number>();
+
+function laneHeightPx(rowKey: string, fallback: number): number {
+  return rowHeights.get(rowKey) ?? fallback;
+}
+
+/**
+ * Añade al pie del gutter de una fila un asa para cambiar su altura
+ * libremente, cada fila por separado — "que cada una se pueda
+ * modular en tamaño lo que se quiera", pedido explícitamente el
+ * 2026-08-21 (sustituye al único tirador global de antes, que
+ * afectaba a todas las pistas de vídeo por igual). Vive en el gutter,
+ * no en el lane, para no interferir con arrastrar/seleccionar clips.
+ */
+function attachRowResizeHandle(gutter: HTMLElement, lane: HTMLElement, rowKey: string): void {
+  const handle = document.createElement("div");
+  handle.className = "row-resize-handle";
+  handle.title = "Arrastra para cambiar la altura de esta pista";
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startY = event.clientY;
+    const startHeight = lane.getBoundingClientRect().height;
+    handle.classList.add("dragging");
+
+    function onMove(moveEvent: PointerEvent): void {
+      const next = Math.max(MIN_LANE_HEIGHT_PX, Math.round(startHeight + (moveEvent.clientY - startY)));
+      rowHeights.set(rowKey, next);
+      lane.style.height = `${next}px`;
+    }
+    function onUp(): void {
+      handle.classList.remove("dragging");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+  gutter.appendChild(handle);
+}
+
 /**
  * Dibuja todas las pistas: una fila por pista de vídeo (más su fila de
  * audio pegado justo debajo) y una fila por pista de audio, en orden
@@ -1719,9 +1811,10 @@ function renderTimelineTracks(): void {
 
     const mainRow = document.createElement("div");
     mainRow.className = "timeline-track-row";
-    mainRow.appendChild(buildTrackGutter(track, allTracks));
+    const mainGutter = buildTrackGutter(track, allTracks);
     const mainLane = document.createElement("div");
     mainLane.className = "timeline-track-lane " + (track.kind === "video" ? "timeline-track-lane--video" : "timeline-track-lane--audio");
+    mainLane.style.height = `${laneHeightPx(track.id, track.kind === "video" ? DEFAULT_VIDEO_LANE_HEIGHT_PX : DEFAULT_AUDIO_LANE_HEIGHT_PX)}px`;
     if (track.kind === "video") {
       renderVideoLaneClips(track, mainLane);
       mainLane.addEventListener("pointerdown", (event) => {
@@ -1731,17 +1824,21 @@ function renderTimelineTracks(): void {
     } else {
       renderAudioLaneClips(track, mainLane);
     }
-    mainRow.appendChild(mainLane);
+    attachRowResizeHandle(mainGutter, mainLane, track.id);
+    mainRow.append(mainGutter, mainLane);
     group.appendChild(mainRow);
 
     if (track.kind === "video") {
+      const audioRowKey = `${track.id}:audio`;
       const audioRow = document.createElement("div");
       audioRow.className = "timeline-track-row timeline-track-row--sub";
-      audioRow.appendChild(buildTrackSubGutter());
+      const subGutter = buildTrackSubGutter();
       const audioLane = document.createElement("div");
       audioLane.className = "timeline-track-lane timeline-track-lane--audio";
+      audioLane.style.height = `${laneHeightPx(audioRowKey, DEFAULT_AUDIO_LANE_HEIGHT_PX)}px`;
       renderAudioLaneClips(track, audioLane);
-      audioRow.appendChild(audioLane);
+      attachRowResizeHandle(subGutter, audioLane, audioRowKey);
+      audioRow.append(subGutter, audioLane);
       group.appendChild(audioRow);
     }
 
@@ -2046,50 +2143,6 @@ document.querySelectorAll<HTMLElement>(".effect-chip").forEach((chip) => {
   });
 });
 
-// Altura de las pistas de vídeo de la línea de tiempo, ajustable
-// arrastrando #timeline-resize-handle hacia arriba/abajo — "al gusto
-// de cada uno", con la preferencia recordada entre sesiones. Se aplica
-// por igual a TODAS las pistas de vídeo (la variable CSS es global).
-const MIN_TIMELINE_TRACK_HEIGHT = 64;
-const MAX_TIMELINE_TRACK_HEIGHT = 240;
-const TIMELINE_TRACK_HEIGHT_STORAGE_KEY = "appVideo.timelineTrackHeight";
-
-function applyTimelineTrackHeight(px: number): void {
-  const clamped = Math.max(MIN_TIMELINE_TRACK_HEIGHT, Math.min(MAX_TIMELINE_TRACK_HEIGHT, px));
-  document.documentElement.style.setProperty("--timeline-track-height", `${clamped}px`);
-  try {
-    localStorage.setItem(TIMELINE_TRACK_HEIGHT_STORAGE_KEY, String(clamped));
-  } catch {
-    // almacenamiento no disponible (modo privado, etc.) — no es crítico, solo se pierde la preferencia entre sesiones.
-  }
-}
-
-try {
-  const saved = Number(localStorage.getItem(TIMELINE_TRACK_HEIGHT_STORAGE_KEY));
-  if (Number.isFinite(saved) && saved > 0) applyTimelineTrackHeight(saved);
-} catch {
-  // ignorar — se queda con la altura por defecto del CSS.
-}
-
-timelineResizeHandle.addEventListener("pointerdown", (event) => {
-  event.preventDefault();
-  const startY = event.clientY;
-  const startHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--timeline-track-height")) || 64;
-  timelineResizeHandle.classList.add("dragging");
-
-  function onMove(moveEvent: PointerEvent): void {
-    // Arrastrar hacia arriba (clientY menor) agranda la timeline.
-    applyTimelineTrackHeight(startHeight + (startY - moveEvent.clientY));
-  }
-  function onUp(): void {
-    timelineResizeHandle.classList.remove("dragging");
-    window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", onUp);
-  }
-  window.addEventListener("pointermove", onMove);
-  window.addEventListener("pointerup", onUp);
-});
-
 playButton.addEventListener("click", playFromPlayhead);
 pauseButton.addEventListener("click", stopPlayback);
 
@@ -2324,7 +2377,7 @@ function renderMarkers(): void {
   for (const marker of markers) {
     const flag = document.createElement("div");
     flag.className = "ruler-marker";
-    flag.style.left = `${Math.round(ticksToSeconds(marker.ticks) * pixelsPerSecond)}px`;
+    flag.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + ticksToSeconds(marker.ticks) * pixelsPerSecond)}px`;
     flag.title = formatRulerTime(ticksToSeconds(marker.ticks));
     flag.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -2613,7 +2666,7 @@ function renderTextTrack(): void {
 
     const block = document.createElement("div");
     block.className = "timeline-text-clip" + (overlay.id === selectedOverlayId ? " selected" : "");
-    block.style.left = `${Math.round(startPx)}px`;
+    block.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + startPx)}px`;
     block.style.width = `${Math.round(widthPx)}px`;
     block.title = overlay.text;
 

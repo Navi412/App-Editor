@@ -216,6 +216,7 @@ interface RawTrack {
   id: string;
   kind: TrackKind;
   hidden?: boolean;
+  name?: string;
   clips: RawClip[];
 }
 
@@ -226,13 +227,16 @@ function isRawTrack(value: unknown): value is RawTrack {
     typeof v.id === "string" &&
     (v.kind === "video" || v.kind === "audio") &&
     (v.hidden === undefined || typeof v.hidden === "boolean") &&
+    (v.name === undefined || typeof v.name === "string") &&
     Array.isArray(v.clips) &&
     v.clips.every(isRawClip)
   );
 }
 
 function normalizeTrack(raw: RawTrack): Track {
-  return { id: raw.id, kind: raw.kind, hidden: raw.hidden ?? false, clips: migrateClipsRipple(raw.clips) };
+  const track: Track = { id: raw.id, kind: raw.kind, hidden: raw.hidden ?? false, clips: migrateClipsRipple(raw.clips) };
+  if (raw.name) track.name = raw.name;
+  return track;
 }
 
 /**

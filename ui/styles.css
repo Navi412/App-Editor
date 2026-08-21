@@ -13,6 +13,12 @@
   --clip: #2e4a72;
   --clip-selected: #3e6bab;
   --radius: 4px;
+  /* Ancho del gutter de cada pista (nombre/ojo-mute/quitar) — debe
+     coincidir con TRACK_GUTTER_WIDTH_PX en ui/main.ts. La regla de
+     segundos, los marcadores, el playhead y la pista de texto reservan
+     este mismo hueco para que los segundos y los clips empiecen justo
+     después de donde están los canales, no se solapen con ellos. */
+  --track-gutter-width: 178px;
 }
 
 * {
@@ -389,18 +395,6 @@ kbd {
   color: var(--text);
 }
 
-.timeline-resize-handle {
-  flex: 0 0 auto;
-  height: 6px;
-  background: var(--border);
-  cursor: ns-resize;
-}
-
-.timeline-resize-handle:hover,
-.timeline-resize-handle.dragging {
-  background: var(--accent);
-}
-
 .timeline-section {
   flex: 0 0 auto;
   background: var(--bg);
@@ -480,6 +474,22 @@ kbd {
   position: relative;
 }
 
+.timeline-ruler::before {
+  /* Bloque decorativo que marca el hueco del gutter (las marcas de
+     segundos, posicionadas desde JS con ese mismo desplazamiento —
+     TRACK_GUTTER_WIDTH_PX en ui/main.ts — nunca caen aquí encima), a
+     juego con el fondo de los gutters reales de las pistas, para que
+     se lea como una sola columna continua. */
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--track-gutter-width);
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
 .timeline-ruler .ruler-mark {
   position: absolute;
   top: 0;
@@ -519,14 +529,19 @@ kbd {
   position: sticky;
   left: 0;
   z-index: 4;
-  flex: 0 0 132px;
+  flex: 0 0 var(--track-gutter-width);
+  /* Sin esto, el ancho mínimo automático de un elemento flex es el de
+     su contenido (nombre + 4 botones) — más ancho que
+     --track-gutter-width, así que el gutter se saldría de su
+     flex-basis y dejaría de alinear la regla/los clips con el resto
+     de filas. */
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.2rem;
   padding: 0 0.3rem;
   background: var(--panel);
   border-right: 1px solid var(--border);
-  overflow: hidden;
 }
 
 .timeline-track-gutter--sub {
@@ -544,6 +559,33 @@ kbd {
   color: var(--text-dim);
 }
 
+/* Nombre editable de una pista — parece una etiqueta hasta que se le
+   hace foco, para no gritar "formulario" en medio de la línea de
+   tiempo. Ampliación de alcance pedida explícitamente el 2026-08-21. */
+.timeline-track-gutter .track-name-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 1px 3px;
+}
+
+.timeline-track-gutter .track-name-input:hover {
+  border-color: var(--border);
+}
+
+.timeline-track-gutter .track-name-input:focus {
+  color: var(--text);
+  background: var(--panel-alt);
+  border-color: var(--accent);
+  outline: none;
+}
+
 .timeline-track-gutter button {
   width: 22px;
   height: 22px;
@@ -557,17 +599,40 @@ kbd {
   opacity: 0.45;
 }
 
+/* Asa para cambiar la altura de ESTA fila (vídeo, su audio pegado, o
+   una pista de audio independiente) — cada una por separado, "lo que
+   se quiera", pedido explícitamente el 2026-08-21. Vive en el pie del
+   gutter, no en el lane, para no interferir con arrastrar/seleccionar
+   clips. */
+.row-resize-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 5px;
+  cursor: ns-resize;
+  z-index: 6;
+}
+
+.row-resize-handle:hover,
+.row-resize-handle.dragging {
+  background: var(--accent);
+}
+
 .timeline-track-lane {
   position: relative;
   flex: 1;
   min-width: 0;
-  /* Ajustable arrastrando #timeline-resize-handle — ver applyTimelineTrackHeight en main.ts. Se aplica a TODAS las pistas de vídeo por igual. */
+  /* La altura la fija JS en línea, por fila — ver laneHeightPx/
+     attachRowResizeHandle en ui/main.ts (cada pista se redimensiona
+     por separado, "lo que se quiera"). Estos valores son solo el
+     respaldo antes de que JS la aplique. */
   background: #101115;
   cursor: pointer;
 }
 
 .timeline-track-lane--video {
-  height: var(--timeline-track-height, 64px);
+  height: 64px;
 }
 
 .timeline-track-lane--audio {

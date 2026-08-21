@@ -137,6 +137,18 @@ export function setTrackHidden(timeline: Timeline, trackId: string, hidden: bool
   return updateTrack(timeline, trackId, (track) => ({ ...track, hidden }));
 }
 
+/** Pone (o, con una cadena vacía/solo espacios, quita) el nombre personalizado de una pista — ver doc de Track.name. */
+export function renameTrack(timeline: Timeline, trackId: string, name: string): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      const { name: _removed, ...rest } = track;
+      return rest;
+    }
+    return { ...track, name: trimmed };
+  });
+}
+
 /**
  * Reordena las capas de composición: "up" acerca la pista a la capa de
  * arriba (índice más alto = tapa a más pistas), "down" la aleja. Sin

@@ -19,6 +19,7 @@ import {
   removeClip,
   removeTrack,
   removeVolumeKeyframe,
+  renameTrack,
   resolveActiveVideoPosition,
   setClipAudio,
   setClipColorFilter,
@@ -262,6 +263,25 @@ describe("addTrack / removeTrack / setTrackHidden / moveTrack", () => {
     const timeline = twoClipTimeline();
     const next = moveTrack(timeline, "video-1", "up");
     expect(next).toEqual(timeline);
+  });
+
+  it("renameTrack pone el nombre personalizado de la pista indicada", () => {
+    const timeline = twoClipTimeline();
+    const next = renameTrack(timeline, "video-1", "Cámara principal");
+    expect(next.tracks[0]!.name).toBe("Cámara principal");
+  });
+
+  it("renameTrack recorta espacios en blanco", () => {
+    const timeline = twoClipTimeline();
+    const next = renameTrack(timeline, "video-1", "  Con espacios  ");
+    expect(next.tracks[0]!.name).toBe("Con espacios");
+  });
+
+  it("renameTrack con una cadena vacía o solo espacios quita el nombre personalizado", () => {
+    const timeline = renameTrack(twoClipTimeline(), "video-1", "Nombre");
+    const next = renameTrack(timeline, "video-1", "   ");
+    expect(next.tracks[0]!.name).toBeUndefined();
+    expect("name" in next.tracks[0]!).toBe(false);
   });
 });
 

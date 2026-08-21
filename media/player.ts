@@ -150,30 +150,26 @@ export function createVideoPlayer(
   /**
    * Si el decoder acaba de pasar por un flush() (siempre ocurre al
    * final de un seekTo), el próximo decode() tiene que ser un
-   * keyframe. Re-alimenta desde el keyframe más cercano hasta
-   * nextSampleIndex-1 (sin flush esta vez) para dejar el decoder listo
-   * para continuar hacia delante con feed() normal. Los fotogramas que
-   * esto vuelve a producir son duplicados del ya mostrado por el seek;
-   * el frame-hold de tick() los descarta sin pintarlos.
+   * keyframe. Rebobina nextSampleIndex hasta el keyframe más cercano
+   * para que el feed() normal (más abajo) re-alimente desde ahí —
+   * NUNCA se vuelca aquí de golpe, sin control de caudal: para un
+   * clip que arranca a mitad de un GOP largo (habitual justo después
+   * de un hueco o un corte manual), un volcado sin límite satura la
+   * cola del decoder de una vez y el resto de feed()/tick() se queda
+   * esperando indefinidamente a que esa cola baje — se comprobó en
+   * vivo que eso deja la reproducción congelada sin ningún error en
+   * consola. Repartir el mismo trabajo en varias llamadas a feed(),
+   * cada una acotada por MAX_DECODE_QUEUE/MAX_BUFFERED_FRAMES, evita
+   * el atasco. Los fotogramas que esto vuelve a producir son
+   * duplicados del ya mostrado por el seek; el frame-hold de tick()
+   * los descarta sin pintarlos.
    */
   function primeDecoderIfNeeded(): void {
     if (!decoderNeedsKeyframe) return;
     decoderNeedsKeyframe = false;
-    const resumeIndex = nextSampleIndex;
-    let keyframeIndex = Math.max(0, resumeIndex - 1);
+    let keyframeIndex = Math.max(0, nextSampleIndex - 1);
     while (keyframeIndex > 0 && !samples[keyframeIndex]!.is_sync) keyframeIndex--;
-    for (let i = keyframeIndex; i < resumeIndex; i++) {
-      const sample = samples[i]!;
-      if (!sample.data) continue;
-      decoder.decode(
-        new EncodedVideoChunk({
-          type: sample.is_sync ? "key" : "delta",
-          timestamp: sampleTimestampUs(sample),
-          duration: sampleDurationUs(sample),
-          data: sample.data,
-        }),
-      );
-    }
+    nextSampleIndex = keyframeIndex;
   }
 
   function showFrame(frame: VideoFrame): void {

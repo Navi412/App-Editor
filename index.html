@@ -81,10 +81,21 @@
             <label>Fin (s) <input id="text-end" type="number" step="0.1" min="0" value="2" /></label>
             <label>Tamaño (px) <input id="text-size" type="number" step="1" min="8" value="48" /></label>
             <label>Color <input id="text-color" type="color" value="#ffffff" /></label>
+            <label
+              >Tipografía
+              <select id="text-font">
+                <option value="sans-serif">Sans-serif</option>
+                <option value="serif">Serif</option>
+                <option value="monospace">Monoespaciada</option>
+                <option value="Impact, sans-serif">Impact</option>
+                <option value="'Comic Sans MS', cursive">Comic Sans</option>
+              </select>
+            </label>
             <label>X (%) <input id="text-x" type="number" step="1" min="0" max="100" value="50" /></label>
             <label>Y (%) <input id="text-y" type="number" step="1" min="0" max="100" value="85" /></label>
           </div>
           <button id="add-text-button" type="button" disabled class="primary">Añadir texto</button>
+          <p class="hint-inline">Arrastra el texto directamente sobre el preview para moverlo.</p>
           <ul id="text-overlay-list" class="marker-list"></ul>
         </section>
 
@@ -117,6 +128,32 @@
           <button id="split-button" type="button" disabled title="Cortar en el playhead (C)">✂ Cortar (C)</button>
           <button id="delete-clip-button" type="button" disabled title="Eliminar clip seleccionado (Supr)">
             🗑 Eliminar (Supr)
+          </button>
+          <button
+            id="insert-gap-button"
+            type="button"
+            disabled
+            title="Insertar un hueco (silencio + negro) después del clip seleccionado"
+          >
+            ⬚ Insertar hueco
+          </button>
+          <label class="toolbar-inline"
+            >Duración (s) <input id="gap-duration" type="number" step="0.1" min="0.1" value="1"
+          /></label>
+          <select id="transition-type" title="Tipo de transición">
+            <option value="crossfade">Fundido cruzado</option>
+            <option value="dipToBlack">Fundido a negro</option>
+          </select>
+          <label class="toolbar-inline"
+            >Duración (s) <input id="transition-duration" type="number" step="0.1" min="0.1" value="0.5"
+          /></label>
+          <button
+            id="insert-transition-button"
+            type="button"
+            disabled
+            title="Insertar una transición después del clip seleccionado"
+          >
+            ⇄ Insertar transición
           </button>
           <span class="spacer"></span>
           <button id="zoom-out-button" type="button" disabled title="Alejar">− Zoom</button>

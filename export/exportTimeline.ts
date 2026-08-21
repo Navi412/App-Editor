@@ -1,5 +1,11 @@
 import { frameDurationTicks, ticksToSeconds } from "../core/time";
-import { effectiveClipVolume, timelineDurationTicks, walkTimeline } from "../core/timeline";
+import {
+  clipDurationTicks,
+  clipStartTicks,
+  effectiveClipVolume,
+  timelineDurationTicks,
+  walkTimeline,
+} from "../core/timeline";
 import type { Timeline } from "../core/types";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import { drawFrameFit } from "../media/render";
@@ -7,6 +13,11 @@ import type { DemuxedTrack } from "../media/samples";
 import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
 import { yieldToTaskQueue } from "../media/scheduling";
 import { drawTextOverlays } from "../media/textOverlayRender";
+import {
+  captureTransitionBoundaryFrames,
+  drawTransitionFrame,
+  type TransitionBoundaryFrames,
+} from "../media/transitionRender";
 import { createMp4Muxer, type Mp4Muxer } from "./muxer";
 
 const DEFAULT_BITRATE = 8_000_000;
@@ -122,6 +133,19 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
     return seeker;
   }
 
+  // Los fotogramas fijos que delimitan cada transición se decodifican
+  // una sola vez (no uno por cada fotograma de salida dentro de su
+  // ventana) y se reutilizan mientras dure el export.
+  const transitionFramesCache = new Map<string, TransitionBoundaryFrames>();
+  async function transitionFramesFor(clipIndex: number, transitionId: string): Promise<TransitionBoundaryFrames> {
+    let frames = transitionFramesCache.get(transitionId);
+    if (!frames) {
+      frames = await captureTransitionBoundaryFrames(timeline, clipIndex, getSource, width, height);
+      transitionFramesCache.set(transitionId, frames);
+    }
+    return frames;
+  }
+
   try {
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       throwIfAborted(signal);
@@ -129,13 +153,23 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
       const position = walkTimeline(timeline, timelineTicks);
       if (!position) break;
 
-      const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
-      const frame = await seekerFor(position.sourceId).next(sourceTimeUs);
-      if (frame) {
-        drawFrameFit(ctx, frame, { width, height });
-        frame.close();
-      } else {
+      if (position.clip.kind === "gap") {
         ctx.clearRect(0, 0, width, height);
+      } else if (position.clip.kind === "transition") {
+        const frames = await transitionFramesFor(position.clipIndex, position.clip.id);
+        const clipStart = clipStartTicks(timeline, position.clipIndex);
+        const duration = clipDurationTicks(position.clip);
+        const progress = duration > 0 ? (timelineTicks - clipStart) / duration : 0;
+        drawTransitionFrame(ctx, width, height, position.clip.transitionType ?? "crossfade", frames, progress);
+      } else {
+        const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
+        const frame = await seekerFor(position.sourceId).next(sourceTimeUs);
+        if (frame) {
+          drawFrameFit(ctx, frame, { width, height });
+          frame.close();
+        } else {
+          ctx.clearRect(0, 0, width, height);
+        }
       }
 
       const activeOverlays = activeTextOverlaysAt(textOverlays, timelineTicks);
@@ -168,6 +202,10 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
   } finally {
     encoder.close();
     for (const seeker of seekers.values()) seeker.destroy();
+    for (const frames of transitionFramesCache.values()) {
+      frames.fromImage?.close();
+      frames.toImage?.close();
+    }
   }
 
   return muxer.finalize();

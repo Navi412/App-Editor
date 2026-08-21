@@ -88,6 +88,15 @@ input[type="number"] {
   width: 5.5rem;
 }
 
+select {
+  background: var(--panel-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.25rem 0.4rem;
+  font-size: 12px;
+}
+
 main {
   display: grid;
   grid-template-columns: 1fr 260px;
@@ -116,6 +125,11 @@ main {
   max-height: 55vh;
   width: auto;
   height: auto;
+  cursor: default;
+}
+
+#preview.dragging-text {
+  cursor: grabbing;
 }
 
 .transport {
@@ -154,6 +168,12 @@ main {
   flex-direction: column;
   gap: 0.35rem;
   margin-bottom: 0.5rem;
+}
+
+.hint-inline {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin: 0.35rem 0 0;
 }
 
 .trim-row label {
@@ -211,6 +231,20 @@ kbd {
 .timeline-toolbar .spacer {
   flex: 1;
 }
+
+.timeline-toolbar .toolbar-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.timeline-toolbar .toolbar-inline input[type="number"] {
+  width: 3.6rem;
+}
+
 
 .timeline-scroll {
   overflow-x: auto;
@@ -315,6 +349,14 @@ kbd {
   padding: 0;
   font-size: 11px;
   border-radius: 3px;
+}
+
+.timeline-clip--gap {
+  background: repeating-linear-gradient(45deg, #2a2c33, #2a2c33 6px, #232529 6px, #232529 12px);
+}
+
+.timeline-clip--transition {
+  background: repeating-linear-gradient(-45deg, #4a3a6b, #4a3a6b 6px, #3a2d55 6px, #3a2d55 12px);
 }
 
 .timeline-audio-track {

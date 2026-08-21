@@ -11,11 +11,25 @@ Una sola pista de vídeo, con su pista de audio asociada (el audio de
 cada clip viaja pegado a su vídeo — mismo `sourceId`, mismo recorte;
 no es una pista independiente que se pueda desincronizar). Cargar
 clips, recortar entrada/salida, ordenar, cortar (split), añadir texto
-superpuesto, previsualizar (con sonido), exportar a MP4 (con audio).
+superpuesto (arrastrable en el preview, con tipografía elegible),
+dejar huecos entre clips, transiciones básicas entre clips (fundido
+cruzado / fundido a negro), previsualizar (con sonido), exportar a MP4
+(con audio).
+
+**Huecos y transiciones — ampliación de alcance pedida explícitamente
+el 2026-08-21.** Se modelan como ya anticipaba `DESIGN.md` §1: un
+"hueco" o una "transición" es un `Clip` especial más en el array
+(`kind: "gap" | "transition"`), nunca un campo de posición aparte —
+mantiene la misma invariante "ripple" de siempre (reordenar/cortar
+siguen siendo operaciones de array puras). Una transición no reproduce
+vídeo propio: congela el último fotograma del clip anterior y el
+primero del siguiente y hace un fundido entre ambos durante su propia
+duración — es la versión "básica" pedida, no una transición con
+movimiento real dentro de la propia transición.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
-ampliarlo:** transiciones, efectos/filtros de vídeo, multipista de
-vídeo (varios clips de vídeo superpuestos), cambios de velocidad.
+ampliarlo:** efectos/filtros de vídeo, multipista de vídeo (varios
+clips de vídeo superpuestos), cambios de velocidad.
 
 No añadas nada de la lista de "fuera de alcance" aunque parezca trivial
 — si aparece la tentación, es señal de que hay que parar y preguntar,

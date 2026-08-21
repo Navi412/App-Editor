@@ -21,7 +21,7 @@ export function drawTextOverlay(
 ): void {
   const x = (overlay.xPercent / 100) * canvasWidth;
   const y = (overlay.yPercent / 100) * canvasHeight;
-  ctx.font = `bold ${overlay.fontSizePx}px sans-serif`;
+  ctx.font = `bold ${overlay.fontSizePx}px ${overlay.fontFamily}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.lineWidth = Math.max(2, overlay.fontSizePx / 12);

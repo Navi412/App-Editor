@@ -16,6 +16,8 @@ export interface TextOverlay {
   yPercent: number;
   fontSizePx: number;
   color: string;
+  /** Valor CSS font-family — ver ui/main.ts TEXT_FONT_OPTIONS para las opciones "básicas" que ofrece la UI. */
+  fontFamily: string;
 }
 
 /** Los overlays activos en un instante de la timeline, en el orden en que deben dibujarse. */

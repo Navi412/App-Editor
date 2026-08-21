@@ -78,8 +78,14 @@ function isProjectSource(value: unknown): value is ProjectSource {
   );
 }
 
-/** Acepta clips sin `volume`/`muted` (proyectos guardados antes de que existieran esos campos) — se normalizan en parseProjectFile. */
-function isClip(value: unknown): value is Omit<Clip, "volume" | "muted"> & Partial<Pick<Clip, "volume" | "muted">> {
+type LegacyClip = Omit<Clip, "volume" | "muted" | "kind" | "transitionType"> &
+  Partial<Pick<Clip, "volume" | "muted" | "kind" | "transitionType">>;
+
+const CLIP_KINDS = new Set(["clip", "gap", "transition"]);
+const TRANSITION_TYPES = new Set(["crossfade", "dipToBlack"]);
+
+/** Acepta clips sin `volume`/`muted`/`kind`/`transitionType` (proyectos guardados antes de que existieran esos campos) — se normalizan en parseProjectFile. */
+function isClip(value: unknown): value is LegacyClip {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -88,15 +94,19 @@ function isClip(value: unknown): value is Omit<Clip, "volume" | "muted"> & Parti
     isFiniteNumber(v.sourceInTicks) &&
     isFiniteNumber(v.sourceOutTicks) &&
     (v.volume === undefined || isFiniteNumber(v.volume)) &&
-    (v.muted === undefined || typeof v.muted === "boolean")
+    (v.muted === undefined || typeof v.muted === "boolean") &&
+    (v.kind === undefined || (typeof v.kind === "string" && CLIP_KINDS.has(v.kind))) &&
+    (v.transitionType === undefined ||
+      (typeof v.transitionType === "string" && TRANSITION_TYPES.has(v.transitionType)))
   );
 }
 
-function normalizeClip(clip: Omit<Clip, "volume" | "muted"> & Partial<Pick<Clip, "volume" | "muted">>): Clip {
+function normalizeClip(clip: LegacyClip): Clip {
   return {
     ...clip,
     volume: clip.volume ?? 1,
     muted: clip.muted ?? false,
+    kind: clip.kind ?? "clip",
   };
 }
 
@@ -110,7 +120,10 @@ function isMarker(value: unknown): value is Marker {
   );
 }
 
-function isTextOverlay(value: unknown): value is TextOverlay {
+type LegacyTextOverlay = Omit<TextOverlay, "fontFamily"> & Partial<Pick<TextOverlay, "fontFamily">>;
+
+/** Acepta overlays sin `fontFamily` (proyectos guardados antes de que existiera) — se normaliza en parseProjectFile. */
+function isTextOverlay(value: unknown): value is LegacyTextOverlay {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -121,8 +134,13 @@ function isTextOverlay(value: unknown): value is TextOverlay {
     isFiniteNumber(v.xPercent) &&
     isFiniteNumber(v.yPercent) &&
     isFiniteNumber(v.fontSizePx) &&
-    typeof v.color === "string"
+    typeof v.color === "string" &&
+    (v.fontFamily === undefined || typeof v.fontFamily === "string")
   );
+}
+
+function normalizeTextOverlay(overlay: LegacyTextOverlay): TextOverlay {
+  return { ...overlay, fontFamily: overlay.fontFamily ?? "sans-serif" };
 }
 
 /** Valida y normaliza un JSON arbitrario a ProjectFile. Lanza con un mensaje claro si no encaja. */
@@ -150,7 +168,9 @@ export function parseProjectFile(data: unknown): ProjectFile {
   const markers =
     Array.isArray(obj.markers) && obj.markers.every(isMarker) ? obj.markers : [];
   const textOverlays =
-    Array.isArray(obj.textOverlays) && obj.textOverlays.every(isTextOverlay) ? obj.textOverlays : [];
+    Array.isArray(obj.textOverlays) && obj.textOverlays.every(isTextOverlay)
+      ? obj.textOverlays.map(normalizeTextOverlay)
+      : [];
 
   return {
     version: 1,

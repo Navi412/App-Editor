@@ -1,4 +1,4 @@
-import type { Clip, Timeline, Track } from "./types";
+import type { Clip, Timeline, TransitionType, Track } from "./types";
 
 /**
  * Todas las funciones de este módulo son puras: reciben una Timeline y
@@ -86,6 +86,41 @@ export function appendClip(timeline: Timeline, clip: Clip): Timeline {
   return {
     ...timeline,
     track: { ...timeline.track, clips: [...timeline.track.clips, clip] },
+  };
+}
+
+/** Inserta `clip` en la posición `index` (recortado a [0, longitud]), desplazando el resto. */
+export function insertClipAt(timeline: Timeline, index: number, clip: Clip): Timeline {
+  const clips = [...timeline.track.clips];
+  const clampedIndex = Math.max(0, Math.min(index, clips.length));
+  clips.splice(clampedIndex, 0, clip);
+  return { ...timeline, track: { ...timeline.track, clips } };
+}
+
+/** Hueco (silencio + negro) de `durationTicks`. Ver DESIGN.md §1: es un Clip especial, no un campo de posición aparte. */
+export function createGap(id: string, durationTicks: number): Clip {
+  return {
+    id,
+    kind: "gap",
+    sourceId: "",
+    sourceInTicks: 0,
+    sourceOutTicks: Math.max(1, durationTicks),
+    volume: 1,
+    muted: false,
+  };
+}
+
+/** Transición básica de `durationTicks` entre el clip anterior y el siguiente en el array (ver media/transitionRender.ts). */
+export function createTransition(id: string, durationTicks: number, transitionType: TransitionType): Clip {
+  return {
+    id,
+    kind: "transition",
+    sourceId: "",
+    sourceInTicks: 0,
+    sourceOutTicks: Math.max(1, durationTicks),
+    volume: 1,
+    muted: false,
+    transitionType,
   };
 }
 

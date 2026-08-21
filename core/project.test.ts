@@ -8,7 +8,15 @@ function sampleTimeline(): Timeline {
     track: {
       id: "track-1",
       clips: [
-        { id: "clip-1", sourceId: "source-1", sourceInTicks: 0, sourceOutTicks: 600000, volume: 1, muted: false },
+        {
+          id: "clip-1",
+          kind: "clip",
+          sourceId: "source-1",
+          sourceInTicks: 0,
+          sourceOutTicks: 600000,
+          volume: 1,
+          muted: false,
+        },
       ],
     },
     outputResolution: { width: 1920, height: 1080 },
@@ -31,7 +39,17 @@ function sampleSources(): ProjectSource[] {
 
 function sampleTextOverlays(): TextOverlay[] {
   return [
-    { id: "t1", startTicks: 0, endTicks: 300000, text: "Hola", xPercent: 50, yPercent: 85, fontSizePx: 48, color: "#fff" },
+    {
+      id: "t1",
+      startTicks: 0,
+      endTicks: 300000,
+      text: "Hola",
+      xPercent: 50,
+      yPercent: 85,
+      fontSizePx: 48,
+      color: "#fff",
+      fontFamily: "sans-serif",
+    },
   ];
 }
 
@@ -71,7 +89,58 @@ describe("serializeProject / parseProjectFile", () => {
     const serialized = serializeProject(timeline, sampleSources(), [], []);
     const oldClip = { id: "clip-1", sourceId: "source-1", sourceInTicks: 0, sourceOutTicks: 600000 };
     const parsed = parseProjectFile({ ...serialized, clips: [oldClip] });
-    expect(parsed.clips).toEqual([{ ...oldClip, volume: 1, muted: false }]);
+    expect(parsed.clips).toEqual([{ ...oldClip, volume: 1, muted: false, kind: "clip" }]);
+  });
+
+  it("normaliza clips guardados antes de que existiera kind a kind:'clip'", () => {
+    const timeline = sampleTimeline();
+    const serialized = serializeProject(timeline, sampleSources(), [], []);
+    const oldClip = {
+      id: "clip-1",
+      sourceId: "source-1",
+      sourceInTicks: 0,
+      sourceOutTicks: 600000,
+      volume: 1,
+      muted: false,
+    };
+    const parsed = parseProjectFile({ ...serialized, clips: [oldClip] });
+    expect(parsed.clips).toEqual([{ ...oldClip, kind: "clip" }]);
+  });
+
+  it("acepta clips de tipo gap/transition con transitionType válido", () => {
+    const timeline = sampleTimeline();
+    const serialized = serializeProject(timeline, sampleSources(), [], []);
+    const gapAndTransition = [
+      { id: "g1", kind: "gap", sourceId: "", sourceInTicks: 0, sourceOutTicks: 100, volume: 1, muted: false },
+      {
+        id: "t1",
+        kind: "transition",
+        sourceId: "",
+        sourceInTicks: 0,
+        sourceOutTicks: 100,
+        volume: 1,
+        muted: false,
+        transitionType: "crossfade",
+      },
+    ];
+    const parsed = parseProjectFile({ ...serialized, clips: gapAndTransition });
+    expect(parsed.clips).toEqual(gapAndTransition);
+  });
+
+  it("lanza si kind o transitionType no son valores reconocidos", () => {
+    const timeline = sampleTimeline();
+    const serialized = serializeProject(timeline, sampleSources(), [], []);
+    const badKind = { id: "c1", kind: "bogus", sourceId: "s", sourceInTicks: 0, sourceOutTicks: 1 };
+    expect(() => parseProjectFile({ ...serialized, clips: [badKind] })).toThrow(/clips/i);
+    const badTransitionType = {
+      id: "c1",
+      kind: "transition",
+      sourceId: "",
+      sourceInTicks: 0,
+      sourceOutTicks: 1,
+      transitionType: "bogus",
+    };
+    expect(() => parseProjectFile({ ...serialized, clips: [badTransitionType] })).toThrow(/clips/i);
   });
 
   it("lanza si la versión no es 1", () => {

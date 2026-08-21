@@ -2,7 +2,10 @@ import { frameDurationTicks, secondsToTicks, ticksToSeconds } from "../core/time
 import {
   appendClip,
   clipStartTicks,
+  createGap,
+  createTransition,
   effectiveClipVolume,
+  insertClipAt,
   removeClip,
   reorderClip,
   setClipAudio,
@@ -14,7 +17,7 @@ import {
 } from "../core/timeline";
 import { parseProjectFile, serializeProject, type ProjectFile, type ProjectSource } from "../core/project";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
-import type { Clip, SourceFile, Timeline } from "../core/types";
+import type { Clip, SourceFile, Timeline, TransitionType } from "../core/types";
 import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
 import { decodeAudioAsset } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
@@ -24,6 +27,11 @@ import { drawFrameFit } from "../media/render";
 import { decodeAllSamples, type DemuxedTrack } from "../media/samples";
 import { toSourceFile } from "../media/sourceFile";
 import { drawTextOverlays } from "../media/textOverlayRender";
+import {
+  captureTransitionBoundaryFrames,
+  drawTransitionFrame,
+  type TransitionBoundaryFrames,
+} from "../media/transitionRender";
 import { generateThumbnail } from "../media/thumbnail";
 import { computeWaveformPeaks, drawWaveformSlice } from "../media/waveform";
 
@@ -60,6 +68,11 @@ const timelineAudioTrack = requireElement<HTMLDivElement>("#timeline-audio-track
 const timelinePlayhead = requireElement<HTMLDivElement>("#timeline-playhead");
 const splitButton = requireElement<HTMLButtonElement>("#split-button");
 const deleteClipButton = requireElement<HTMLButtonElement>("#delete-clip-button");
+const insertGapButton = requireElement<HTMLButtonElement>("#insert-gap-button");
+const gapDurationInput = requireElement<HTMLInputElement>("#gap-duration");
+const transitionTypeSelect = requireElement<HTMLSelectElement>("#transition-type");
+const transitionDurationInput = requireElement<HTMLInputElement>("#transition-duration");
+const insertTransitionButton = requireElement<HTMLButtonElement>("#insert-transition-button");
 const zoomOutButton = requireElement<HTMLButtonElement>("#zoom-out-button");
 const zoomFitButton = requireElement<HTMLButtonElement>("#zoom-fit-button");
 const zoomInButton = requireElement<HTMLButtonElement>("#zoom-in-button");
@@ -81,6 +94,7 @@ const textStartInput = requireElement<HTMLInputElement>("#text-start");
 const textEndInput = requireElement<HTMLInputElement>("#text-end");
 const textSizeInput = requireElement<HTMLInputElement>("#text-size");
 const textColorInput = requireElement<HTMLInputElement>("#text-color");
+const textFontSelect = requireElement<HTMLSelectElement>("#text-font");
 const textXInput = requireElement<HTMLInputElement>("#text-x");
 const textYInput = requireElement<HTMLInputElement>("#text-y");
 const addTextButton = requireElement<HTMLButtonElement>("#add-text-button");
@@ -134,6 +148,17 @@ let textOverlays: TextOverlay[] = [];
 const audioContext = new AudioContext();
 let activeAudioHandle: AudioPlaybackHandle | undefined;
 
+// Reproducción "sintética" (huecos y transiciones): no hay VideoPlayer
+// real detrás, así que un requestAnimationFrame propio avanza el
+// playhead y redibuja cada fotograma — ver playSyntheticSegment.
+let syntheticAnimationHandle: number | undefined;
+let syntheticCleanup: (() => void) | undefined;
+
+// Fotogramas fijos (último del clip anterior / primero del siguiente)
+// de cada transición, cacheados por id mientras la timeline no cambie
+// — se recalculan solos en el próximo commitTimeline si algo cambia.
+const transitionFrameCache = new Map<string, TransitionBoundaryFrames>();
+
 /** Posición del playhead en ticks de la timeline — única fuente de verdad de "dónde estamos". */
 let playheadTicks = 0;
 let timelineTotalTicks = 0;
@@ -167,6 +192,30 @@ function pushHistory(previous: Timeline): void {
 function commitTimeline(next: Timeline): void {
   if (timeline) pushHistory(timeline);
   timeline = next;
+  clearTransitionFrameCache();
+}
+
+/** Los fotogramas fijos de cada transición dejan de ser válidos en cuanto cambia algo de la timeline (pudo cambiar quién es su vecino). */
+function clearTransitionFrameCache(): void {
+  for (const frames of transitionFrameCache.values()) {
+    frames.fromImage?.close();
+    frames.toImage?.close();
+  }
+  transitionFrameCache.clear();
+}
+
+async function transitionFramesFor(tl: Timeline, clipIndex: number, transitionId: string): Promise<TransitionBoundaryFrames> {
+  const cached = transitionFrameCache.get(transitionId);
+  if (cached) return cached;
+  const frames = await captureTransitionBoundaryFrames(
+    tl,
+    clipIndex,
+    (sourceId) => sources.get(sourceId)?.demuxed,
+    tl.outputResolution.width,
+    tl.outputResolution.height,
+  );
+  transitionFrameCache.set(transitionId, frames);
+  return frames;
 }
 
 function updateHistoryButtons(): void {
@@ -262,15 +311,31 @@ async function handleClipEnded(sourceId: string): Promise<void> {
   if (!timeline || playingClipIndex === undefined) return;
   const clip = timeline.track.clips[playingClipIndex];
   if (!clip || clip.sourceId !== sourceId) return; // señal obsoleta de un player que ya no está activo
-  const nextIndex = playingClipIndex + 1;
+  await advanceAfterClip(playingClipIndex);
+}
+
+/** Al terminar el clip/hueco/transición en `finishedIndex`, sigue con el siguiente o termina la reproducción. */
+async function advanceAfterClip(finishedIndex: number): Promise<void> {
+  if (!timeline || playingClipIndex !== finishedIndex) return; // señal obsoleta
+  const nextIndex = finishedIndex + 1;
   if (nextIndex < timeline.track.clips.length) {
-    await playClipFrom(nextIndex, 0);
+    await playFromClipIndex(nextIndex, 0);
   } else {
     playingClipIndex = undefined;
     pauseButton.disabled = true;
     await seekToTimelineTicks(0);
     status.textContent = "Reproducción terminada.";
   }
+}
+
+/** Reparte hacia el reproductor real (clip) o hacia la reproducción sintética (hueco/transición) según el tipo. */
+function playFromClipIndex(clipIndex: number, offsetTicks: number): Promise<void> {
+  const tl = requireTimeline();
+  const clip = tl.track.clips[clipIndex];
+  if (!clip) return Promise.resolve();
+  if (clip.kind === "gap") return playGapFrom(clipIndex, offsetTicks);
+  if (clip.kind === "transition") return playTransitionFrom(clipIndex, offsetTicks);
+  return playClipFrom(clipIndex, offsetTicks);
 }
 
 async function playClipFrom(clipIndex: number, offsetTicks: number): Promise<void> {
@@ -304,24 +369,108 @@ async function playClipFrom(clipIndex: number, offsetTicks: number): Promise<voi
   pauseButton.disabled = false;
 }
 
+/**
+ * Avanza el playhead con un requestAnimationFrame propio (no hay
+ * VideoPlayer real detrás) desde `offsetTicks` dentro del clip hasta
+ * su final, llamando a `render(ticks)` en cada fotograma. Usado por
+ * huecos y transiciones — ver playGapFrom/playTransitionFrom.
+ */
+function playSyntheticSegment(
+  clipIndex: number,
+  offsetTicks: number,
+  render: (ticks: number) => void,
+  cleanup?: () => void,
+): void {
+  const tl = requireTimeline();
+  const clip = tl.track.clips[clipIndex];
+  if (!clip) return;
+  playingClipIndex = clipIndex;
+  activeAudioHandle?.stop();
+  activeAudioHandle = undefined;
+  pauseButton.disabled = false;
+  syntheticCleanup = cleanup;
+
+  const durationTicks = clip.sourceOutTicks - clip.sourceInTicks;
+  const clipStart = clipStartTicks(tl, clipIndex);
+  const endTicks = clipStart + durationTicks;
+  const wallStartMs = performance.now();
+  const startOffsetSeconds = ticksToSeconds(offsetTicks);
+
+  function tick(): void {
+    const elapsedSeconds = startOffsetSeconds + (performance.now() - wallStartMs) / 1000;
+    const ticks = Math.min(endTicks, clipStart + secondsToTicks(elapsedSeconds));
+    setPlayheadTicks(ticks);
+    render(ticks);
+    if (ticks >= endTicks) {
+      syntheticCleanup = undefined;
+      cleanup?.();
+      void advanceAfterClip(clipIndex);
+      return;
+    }
+    syntheticAnimationHandle = requestAnimationFrame(tick);
+  }
+  syntheticAnimationHandle = requestAnimationFrame(tick);
+}
+
+function stopSyntheticPlayback(): void {
+  if (syntheticAnimationHandle !== undefined) {
+    cancelAnimationFrame(syntheticAnimationHandle);
+    syntheticAnimationHandle = undefined;
+  }
+  syntheticCleanup?.();
+  syntheticCleanup = undefined;
+}
+
+function drawGapFrame(ticks: number): void {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const active = activeTextOverlaysAt(textOverlays, ticks);
+  if (active.length > 0) drawTextOverlays(ctx, active, canvas.width, canvas.height);
+}
+
+function playGapFrom(clipIndex: number, offsetTicks: number): Promise<void> {
+  playSyntheticSegment(clipIndex, offsetTicks, drawGapFrame);
+  return Promise.resolve();
+}
+
+async function playTransitionFrom(clipIndex: number, offsetTicks: number): Promise<void> {
+  const tl = requireTimeline();
+  const clip = tl.track.clips[clipIndex];
+  if (!clip) return;
+  playingClipIndex = clipIndex;
+  activeAudioHandle?.stop();
+  activeAudioHandle = undefined;
+
+  const frames = await transitionFramesFor(tl, clipIndex, clip.id);
+  if (playingClipIndex !== clipIndex) return; // el usuario ya saltó a otro sitio mientras decodificábamos
+
+  const durationTicks = clip.sourceOutTicks - clip.sourceInTicks;
+  const clipStart = clipStartTicks(tl, clipIndex);
+  playSyntheticSegment(clipIndex, offsetTicks, (ticks) => {
+    const progress = durationTicks > 0 ? (ticks - clipStart) / durationTicks : 0;
+    drawTransitionFrame(ctx, canvas.width, canvas.height, clip.transitionType ?? "crossfade", frames, progress);
+    const active = activeTextOverlaysAt(textOverlays, ticks);
+    if (active.length > 0) drawTextOverlays(ctx, active, canvas.width, canvas.height);
+  });
+}
+
 function stopPlayback(): void {
   activeAudioHandle?.stop();
   activeAudioHandle = undefined;
+  stopSyntheticPlayback();
   if (!timeline || playingClipIndex === undefined) return;
   const clip = timeline.track.clips[playingClipIndex];
-  if (clip) getPlayer(clip.sourceId).pause();
+  if (clip && clip.kind === "clip") getPlayer(clip.sourceId).pause();
   playingClipIndex = undefined;
   pauseButton.disabled = true;
 }
 
-/** Reproduce desde el playhead actual hasta el final del clip que ocupa esa posición. */
+/** Reproduce desde el playhead actual hasta el final del clip/hueco/transición que ocupa esa posición. */
 function playFromPlayhead(): void {
   if (!timeline) return;
   const position = walkTimeline(timeline, playheadTicks);
   if (!position) return;
-  const clip = timeline.track.clips[position.clipIndex]!;
-  const offset = position.sourceTimeTicks - clip.sourceInTicks;
-  void playClipFrom(position.clipIndex, offset);
+  const offset = position.sourceTimeTicks - position.clip.sourceInTicks;
+  void playFromClipIndex(position.clipIndex, offset);
 }
 
 function togglePlayPause(): void {
@@ -335,10 +484,34 @@ async function seekToTimelineTicks(ticks: number): Promise<void> {
   stopPlayback();
   const position = walkTimeline(timeline, ticks);
   if (!position) return;
+
+  // Se fija ANTES de decodificar/dibujar: el callback onFrame del
+  // reproductor (más abajo) usa playheadTicks como último recurso para
+  // saber qué overlays de texto están activos (timelineTicksForSourceFrame
+  // no puede resolverlo durante un seek suelto, sin reproducción activa).
+  // Fijarlo después dejaría ese cálculo usando la posición del seek
+  // ANTERIOR mientras este fotograma se dibuja.
+  setPlayheadTicks(ticks);
+
+  if (position.clip.kind === "gap") {
+    drawGapFrame(ticks);
+    return;
+  }
+  if (position.clip.kind === "transition") {
+    const clip = position.clip;
+    const durationTicks = clip.sourceOutTicks - clip.sourceInTicks;
+    const clipStart = clipStartTicks(timeline, position.clipIndex);
+    const progress = durationTicks > 0 ? (ticks - clipStart) / durationTicks : 0;
+    const frames = await transitionFramesFor(timeline, position.clipIndex, clip.id);
+    drawTransitionFrame(ctx, canvas.width, canvas.height, clip.transitionType ?? "crossfade", frames, progress);
+    const active = activeTextOverlaysAt(textOverlays, ticks);
+    if (active.length > 0) drawTextOverlays(ctx, active, canvas.width, canvas.height);
+    return;
+  }
+
   const player = getPlayer(position.sourceId);
   const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
   await player.seekTo(sourceTimeUs);
-  setPlayheadTicks(ticks);
 }
 
 /** Un paso de fotograma hacia delante (1) o hacia atrás (-1), según la frame rate de salida. */
@@ -649,6 +822,14 @@ function beginTrimDrag(event: PointerEvent, clipIndex: number, handle: "left" | 
   window.addEventListener("pointerup", onUp);
 }
 
+function clipLabel(clip: Clip, entry: SourceEntry | undefined): string {
+  if (clip.kind === "gap") return "Hueco";
+  if (clip.kind === "transition") {
+    return clip.transitionType === "dipToBlack" ? "Transición: a negro" : "Transición: fundido";
+  }
+  return entry?.fileName ?? clip.sourceId;
+}
+
 function renderTimeline(): void {
   timelineTrack.innerHTML = "";
   if (!timeline) return;
@@ -658,7 +839,11 @@ function renderTimeline(): void {
     const durationTicks = clip.sourceOutTicks - clip.sourceInTicks;
 
     const block = document.createElement("div");
-    block.className = "timeline-clip" + (index === selectedClipIndex ? " selected" : "");
+    block.className =
+      "timeline-clip" +
+      (index === selectedClipIndex ? " selected" : "") +
+      (clip.kind === "gap" ? " timeline-clip--gap" : "") +
+      (clip.kind === "transition" ? " timeline-clip--transition" : "");
     block.style.width = `${ticksToSeconds(durationTicks) * pixelsPerSecond}px`;
     if (entry?.thumbnail) block.style.backgroundImage = `url(${entry.thumbnail})`;
     block.draggable = true;
@@ -666,7 +851,7 @@ function renderTimeline(): void {
 
     const name = document.createElement("span");
     name.className = "clip-name";
-    name.textContent = entry?.fileName ?? clip.sourceId;
+    name.textContent = clipLabel(clip, entry);
 
     const duration = document.createElement("span");
     duration.className = "clip-duration";
@@ -820,6 +1005,8 @@ function enableEditingControls(): void {
   addMarkerButton.disabled = false;
   addTextButton.disabled = false;
   previewZoomButton.disabled = false;
+  insertGapButton.disabled = false;
+  insertTransitionButton.disabled = false;
 }
 
 /** Decodifica el audio de un archivo (si tiene) y precalcula los picos de su forma de onda. undefined en ambos si no hay audio decodificable. */
@@ -865,6 +1052,7 @@ async function addClipFromFile(file: File): Promise<void> {
 
     const clip: Clip = {
       id: `clip-${nextClipNumber++}`,
+      kind: "clip",
       sourceId,
       sourceInTicks: 0,
       sourceOutTicks: sourceFile.durationTicks,
@@ -982,6 +1170,37 @@ splitButton.addEventListener("click", splitAtPlayhead);
 deleteClipButton.addEventListener("click", () => {
   if (selectedClipIndex !== undefined) removeClipAt(selectedClipIndex);
 });
+
+/** Inserta `clip` justo después del clip seleccionado (o al final si no hay ninguno seleccionado) y lo selecciona. */
+function insertAfterSelected(clip: Clip): void {
+  if (!timeline) return;
+  const index = selectedClipIndex !== undefined ? selectedClipIndex + 1 : timeline.track.clips.length;
+  commitTimeline(insertClipAt(timeline, index, clip));
+  refreshTimelineLayout();
+  selectClip(index);
+  void seekToTimelineTicks(clipStartTicks(timeline, index));
+}
+
+insertGapButton.addEventListener("click", () => {
+  const seconds = Number(gapDurationInput.value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    status.textContent = "Duración de hueco inválida.";
+    return;
+  }
+  insertAfterSelected(createGap(`gap-${nextClipNumber++}`, secondsToTicks(seconds)));
+  status.textContent = "Hueco insertado — arrastra sus bordes para ajustar la duración.";
+});
+
+insertTransitionButton.addEventListener("click", () => {
+  const seconds = Number(transitionDurationInput.value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    status.textContent = "Duración de transición inválida.";
+    return;
+  }
+  const transitionType = transitionTypeSelect.value as TransitionType;
+  insertAfterSelected(createTransition(`transition-${nextClipNumber++}`, secondsToTicks(seconds), transitionType));
+  status.textContent = "Transición insertada entre el clip anterior y el siguiente.";
+});
 playButton.addEventListener("click", playFromPlayhead);
 pauseButton.addEventListener("click", stopPlayback);
 
@@ -992,6 +1211,77 @@ previewZoomButton.addEventListener("click", () => {
 });
 
 window.addEventListener("resize", () => refreshTimelineLayout());
+
+// --- Arrastrar overlays de texto directamente sobre el preview ---
+
+/** Convierte coordenadas de pantalla a coordenadas de píxel del canvas (que puede estar escalado por CSS). */
+function canvasPointFromEvent(event: PointerEvent): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  return { x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY };
+}
+
+/** Ancho aproximado del texto ya renderizado, para el hit-test de arrastre — mismo font que drawTextOverlay. */
+function measureOverlayWidth(overlay: TextOverlay): number {
+  ctx.font = `bold ${overlay.fontSizePx}px ${overlay.fontFamily}`;
+  return ctx.measureText(overlay.text).width;
+}
+
+/** El overlay activo (visible ahora mismo) que hay bajo `point`, si lo hay — el último dibujado (más "encima") gana. */
+function hitTestOverlay(point: { x: number; y: number }): TextOverlay | undefined {
+  const active = activeTextOverlaysAt(textOverlays, playheadTicks);
+  for (let i = active.length - 1; i >= 0; i--) {
+    const overlay = active[i]!;
+    const cx = (overlay.xPercent / 100) * canvas.width;
+    const cy = (overlay.yPercent / 100) * canvas.height;
+    const width = measureOverlayWidth(overlay);
+    const height = overlay.fontSizePx * 1.3;
+    if (
+      point.x >= cx - width / 2 &&
+      point.x <= cx + width / 2 &&
+      point.y >= cy - height / 2 &&
+      point.y <= cy + height / 2
+    ) {
+      return overlay;
+    }
+  }
+  return undefined;
+}
+
+function beginTextOverlayDrag(overlay: TextOverlay, startPoint: { x: number; y: number }): void {
+  stopPlayback();
+  const startXPercent = overlay.xPercent;
+  const startYPercent = overlay.yPercent;
+  canvas.classList.add("dragging-text");
+
+  function onMove(moveEvent: PointerEvent): void {
+    const point = canvasPointFromEvent(moveEvent);
+    const deltaXPercent = ((point.x - startPoint.x) / canvas.width) * 100;
+    const deltaYPercent = ((point.y - startPoint.y) / canvas.height) * 100;
+    overlay.xPercent = Math.max(0, Math.min(100, startXPercent + deltaXPercent));
+    overlay.yPercent = Math.max(0, Math.min(100, startYPercent + deltaYPercent));
+    void seekToTimelineTicks(playheadTicks);
+  }
+
+  function onUp(): void {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    canvas.classList.remove("dragging-text");
+    status.textContent = "Posición del texto actualizada.";
+  }
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (!timeline || textOverlays.length === 0) return;
+  const overlay = hitTestOverlay(canvasPointFromEvent(event));
+  if (!overlay) return;
+  event.preventDefault();
+  beginTextOverlayDrag(overlay, canvasPointFromEvent(event));
+});
 
 // --- Marcadores ---
 
@@ -1069,6 +1359,7 @@ function addTextOverlayFromForm(): void {
     yPercent: Number(textYInput.value),
     fontSizePx: Number(textSizeInput.value),
     color: textColorInput.value,
+    fontFamily: textFontSelect.value,
   });
   renderTextOverlayList();
   void seekToTimelineTicks(playheadTicks); // redibuja el preview para que se vea si cae en rango
@@ -1326,6 +1617,7 @@ async function applyPendingProject(project: ProjectFile, files: File[]): Promise
   for (const entry of sources.values()) entry.player?.destroy();
   sources.clear();
   for (const [id, entry] of newSources) sources.set(id, entry);
+  clearTransitionFrameCache();
 
   timeline = {
     track: { id: "track-1", clips: project.clips },

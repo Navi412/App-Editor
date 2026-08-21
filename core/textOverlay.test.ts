@@ -2,7 +2,17 @@ import { describe, expect, it } from "vitest";
 import { activeTextOverlaysAt, type TextOverlay } from "./textOverlay";
 
 function overlay(id: string, startTicks: number, endTicks: number): TextOverlay {
-  return { id, startTicks, endTicks, text: id, xPercent: 50, yPercent: 90, fontSizePx: 32, color: "#fff" };
+  return {
+    id,
+    startTicks,
+    endTicks,
+    text: id,
+    xPercent: 50,
+    yPercent: 90,
+    fontSizePx: 32,
+    color: "#fff",
+    fontFamily: "sans-serif",
+  };
 }
 
 describe("activeTextOverlaysAt", () => {

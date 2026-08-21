@@ -4,7 +4,10 @@ import {
   appendClip,
   clipDurationTicks,
   clipStartTicks,
+  createGap,
+  createTransition,
   effectiveClipVolume,
+  insertClipAt,
   removeClip,
   reorderClip,
   setClipAudio,
@@ -19,6 +22,7 @@ import type { Clip, Timeline } from "./types";
 function clip(id: string, sourceId: string, inSec: number, outSec: number): Clip {
   return {
     id,
+    kind: "clip",
     sourceId,
     sourceInTicks: secondsToTicks(inSec),
     sourceOutTicks: secondsToTicks(outSec),
@@ -250,5 +254,52 @@ describe("setClipAudio / effectiveClipVolume", () => {
   it("effectiveClipVolume es 0 si el clip está silenciado, independientemente de volume", () => {
     expect(effectiveClipVolume({ ...clip("a", "s", 0, 1), volume: 0.8, muted: true })).toBe(0);
     expect(effectiveClipVolume({ ...clip("a", "s", 0, 1), volume: 0.8, muted: false })).toBe(0.8);
+  });
+});
+
+describe("createGap / createTransition / insertClipAt", () => {
+  it("createGap produce un clip sin sourceId cuya duración es la pedida", () => {
+    const gap = createGap("gap-1", secondsToTicks(2));
+    expect(gap.kind).toBe("gap");
+    expect(gap.sourceId).toBe("");
+    expect(clipDurationTicks(gap)).toBe(secondsToTicks(2));
+  });
+
+  it("createGap fuerza una duración mínima de 1 tick", () => {
+    expect(clipDurationTicks(createGap("gap-1", 0))).toBe(1);
+    expect(clipDurationTicks(createGap("gap-1", -5))).toBe(1);
+  });
+
+  it("createTransition produce un clip con su tipo y duración", () => {
+    const transition = createTransition("t-1", secondsToTicks(0.5), "crossfade");
+    expect(transition.kind).toBe("transition");
+    expect(transition.transitionType).toBe("crossfade");
+    expect(clipDurationTicks(transition)).toBe(secondsToTicks(0.5));
+  });
+
+  it("insertClipAt inserta en la posición pedida sin afectar a los demás clips", () => {
+    const timeline = twoClipTimeline();
+    const gap = createGap("gap-1", secondsToTicks(1));
+    const next = insertClipAt(timeline, 1, gap);
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "gap-1", "b"]);
+    expect(timelineDurationTicks(next)).toBe(timelineDurationTicks(timeline) + secondsToTicks(1));
+  });
+
+  it("insertClipAt recorta el índice a [0, longitud]", () => {
+    const timeline = twoClipTimeline();
+    const gap = createGap("gap-1", secondsToTicks(1));
+    expect(insertClipAt(timeline, -5, gap).track.clips.map((c) => c.id)).toEqual(["gap-1", "a", "b"]);
+    expect(insertClipAt(timeline, 99, gap).track.clips.map((c) => c.id)).toEqual(["a", "b", "gap-1"]);
+  });
+
+  it("un hueco/transición participa normalmente en walkTimeline", () => {
+    const timeline = twoClipTimeline();
+    const gap = createGap("gap-1", secondsToTicks(1));
+    const next = insertClipAt(timeline, 1, gap);
+    // "a" dura 2s (0-2s), luego el hueco de 1s (2-3s), luego "b" (3-6s).
+    const posInGap = walkTimeline(next, secondsToTicks(2.5));
+    expect(posInGap?.clip.kind).toBe("gap");
+    const posInB = walkTimeline(next, secondsToTicks(3.5));
+    expect(posInB?.sourceId).toBe("source-b");
   });
 });

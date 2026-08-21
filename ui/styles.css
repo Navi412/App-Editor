@@ -192,6 +192,58 @@ main {
   margin: 0;
 }
 
+/* --- Panel de efectos (izquierda del preview): "carpetas" plegables con
+   ítems arrastrables — nunca botones de "aplicar", el efecto se suelta
+   sobre un clip de la línea de tiempo (ver handleEffectDrop en main.ts). --- */
+
+.effects-panel {
+  flex: 0 0 200px;
+  min-height: 0;
+  background: var(--panel);
+  padding: 0.75rem;
+  overflow-y: auto;
+}
+
+.effects-panel h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 0 0 0.4rem;
+}
+
+.effect-folder {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.5rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.effect-folder summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0.15rem 0;
+}
+
+.effect-folder-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.effect-chip {
+  text-align: left;
+  cursor: grab;
+  background: var(--panel);
+}
+
+.effect-chip:active {
+  cursor: grabbing;
+}
+
 /* --- Secciones plegables del panel lateral: cada una es su propia "tarjeta", para que se lean como compartimentos separados en vez de un único bloque largo. --- */
 
 .panel-section {
@@ -337,6 +389,18 @@ kbd {
   color: var(--text);
 }
 
+.timeline-resize-handle {
+  flex: 0 0 auto;
+  height: 6px;
+  background: var(--border);
+  cursor: ns-resize;
+}
+
+.timeline-resize-handle:hover,
+.timeline-resize-handle.dragging {
+  background: var(--accent);
+}
+
 .timeline-section {
   flex: 0 0 auto;
   background: var(--bg);
@@ -429,7 +493,8 @@ kbd {
 
 .timeline-track {
   display: flex;
-  height: 64px;
+  /* Ajustable arrastrando #timeline-resize-handle — ver applyTimelineTrackHeight en main.ts. */
+  height: var(--timeline-track-height, 64px);
   background: #101115;
   cursor: pointer;
 }
@@ -462,6 +527,11 @@ kbd {
 .timeline-clip.selected {
   background: var(--clip-selected);
   outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.timeline-clip.drop-target {
+  outline: 2px dashed var(--accent);
   outline-offset: -2px;
 }
 

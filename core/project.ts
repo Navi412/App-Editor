@@ -83,6 +83,7 @@ type LegacyClip = Omit<Clip, "volume" | "muted" | "kind" | "transitionType"> &
 
 const CLIP_KINDS = new Set(["clip", "gap", "transition"]);
 const TRANSITION_TYPES = new Set(["crossfade", "dipToBlack"]);
+const COLOR_FILTER_TYPES = new Set(["grayscale", "sepia", "invert", "warm", "cool", "highContrast"]);
 
 function isVolumeKeyframeArray(value: unknown): value is VolumeKeyframe[] {
   return (
@@ -109,7 +110,8 @@ function isClip(value: unknown): value is LegacyClip {
     (v.kind === undefined || (typeof v.kind === "string" && CLIP_KINDS.has(v.kind))) &&
     (v.transitionType === undefined ||
       (typeof v.transitionType === "string" && TRANSITION_TYPES.has(v.transitionType))) &&
-    (v.volumeKeyframes === undefined || isVolumeKeyframeArray(v.volumeKeyframes))
+    (v.volumeKeyframes === undefined || isVolumeKeyframeArray(v.volumeKeyframes)) &&
+    (v.colorFilter === undefined || (typeof v.colorFilter === "string" && COLOR_FILTER_TYPES.has(v.colorFilter)))
   );
 }
 

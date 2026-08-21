@@ -17,6 +17,7 @@ import {
   removeVolumeKeyframe,
   reorderClip,
   setClipAudio,
+  setClipColorFilter,
   splitClipAt,
   timelineDurationTicks,
   transitionAudioCues,
@@ -263,6 +264,27 @@ describe("setClipAudio / effectiveClipVolume", () => {
   it("effectiveClipVolume es 0 si el clip está silenciado, independientemente de volume", () => {
     expect(effectiveClipVolume({ ...clip("a", "s", 0, 1), volume: 0.8, muted: true })).toBe(0);
     expect(effectiveClipVolume({ ...clip("a", "s", 0, 1), volume: 0.8, muted: false })).toBe(0.8);
+  });
+});
+
+describe("setClipColorFilter", () => {
+  it("añade el filtro al clip indicado, sin tocar los demás", () => {
+    const timeline = twoClipTimeline();
+    const next = setClipColorFilter(timeline, 0, "grayscale");
+    expect(next.track.clips[0]!.colorFilter).toBe("grayscale");
+    expect(next.track.clips[1]!.colorFilter).toBeUndefined();
+  });
+
+  it("con undefined quita el filtro en vez de dejarlo puesto", () => {
+    const timeline = setClipColorFilter(twoClipTimeline(), 0, "sepia");
+    const next = setClipColorFilter(timeline, 0, undefined);
+    expect(next.track.clips[0]!.colorFilter).toBeUndefined();
+    expect("colorFilter" in next.track.clips[0]!).toBe(false);
+  });
+
+  it("lanza con un índice fuera de rango", () => {
+    const timeline = twoClipTimeline();
+    expect(() => setClipColorFilter(timeline, 5, "invert")).toThrow(RangeError);
   });
 });
 

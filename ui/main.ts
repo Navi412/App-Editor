@@ -13,6 +13,7 @@ import {
   removeClip,
   removeVolumeKeyframe,
   setClipAudio,
+  setClipColorFilter,
   splitClipAt,
   timelineDurationTicks,
   transitionAudioCues,
@@ -23,13 +24,13 @@ import {
 } from "../core/timeline";
 import { parseProjectFile, serializeProject, type ProjectFile, type ProjectSource } from "../core/project";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
-import type { Clip, Resolution, SourceFile, Timeline, TransitionType } from "../core/types";
+import type { Clip, ColorFilterType, Resolution, SourceFile, Timeline, TransitionType } from "../core/types";
 import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
 import { decodeAudioAsset } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
 import { getDecoderDescription } from "../media/description";
 import { createVideoPlayer, type VideoPlayer } from "../media/player";
-import { drawFrameFit } from "../media/render";
+import { colorFilterCss, drawFrameFit } from "../media/render";
 import { decodeAllSamples, type DemuxedTrack } from "../media/samples";
 import { toSourceFile } from "../media/sourceFile";
 import { drawTextOverlays } from "../media/textOverlayRender";
@@ -88,6 +89,8 @@ const trimInInput = requireElement<HTMLInputElement>("#trim-in");
 const trimOutInput = requireElement<HTMLInputElement>("#trim-out");
 const applyTrimButton = requireElement<HTMLButtonElement>("#apply-trim");
 const clipMutedInput = requireElement<HTMLInputElement>("#clip-muted");
+const clipColorFilterSelect = requireElement<HTMLSelectElement>("#clip-color-filter");
+const timelineResizeHandle = requireElement<HTMLDivElement>("#timeline-resize-handle");
 const outputControls = requireElement<HTMLFieldSetElement>("#output-controls");
 const outputWidthInput = requireElement<HTMLInputElement>("#output-width");
 const outputHeightInput = requireElement<HTMLInputElement>("#output-height");
@@ -149,6 +152,8 @@ let selectedClipIndex: number | undefined;
 /** Id del overlay de texto seleccionado (en la línea de tiempo o el preview) — mutuamente excluyente con selectedClipIndex, ver selectTextOverlay/selectClip. */
 let selectedOverlayId: string | undefined;
 let playingClipIndex: number | undefined;
+/** Filtro de color del clip cuyo fotograma se está pintando ahora mismo (reproducción o scrub) — lo lee el onFrame de getPlayer más abajo. Separado de playingClipIndex porque el scrub también necesita pintar el filtro correcto sin considerarse "reproduciendo". */
+let activeColorFilter: ColorFilterType | undefined;
 let nextSourceNumber = 1;
 let nextClipNumber = 1;
 let nextOverlayNumber = 1;
@@ -304,6 +309,7 @@ function afterHistoryChange(): void {
     trimInInput.value = String(ticksToSeconds(clip.sourceInTicks));
     trimOutInput.value = String(ticksToSeconds(clip.sourceOutTicks));
     clipMutedInput.checked = clip.muted;
+    clipColorFilterSelect.value = clip.colorFilter ?? "";
   }
   void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
   updateHistoryButtons();
@@ -391,7 +397,7 @@ function getPlayer(sourceId: string): VideoPlayer {
     entry.player = createVideoPlayer(entry.demuxed, {
       onFrame: (frame) => {
         if (!timeline) return;
-        drawFrameFit(ctx, frame, timeline.outputResolution);
+        drawFrameFit(ctx, frame, timeline.outputResolution, activeColorFilter);
         if (textOverlays.length > 0) {
           const ticks = timelineTicksForSourceFrame(sourceId, frame.timestamp) ?? playheadTicks;
           drawActiveTextOverlays(ticks);
@@ -456,6 +462,7 @@ async function playClipFrom(clipIndex: number, offsetTicks: number): Promise<voi
   const startUs = Math.round(startSeconds * 1_000_000);
   const endUs = Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000);
   playingClipIndex = clipIndex;
+  activeColorFilter = clip.colorFilter;
 
   stopActiveAudio();
 
@@ -642,6 +649,7 @@ async function seekToTimelineTicks(ticks: number): Promise<void> {
     return;
   }
 
+  activeColorFilter = position.clip.colorFilter;
   const player = getPlayer(position.sourceId);
   const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
   await player.seekTo(sourceTimeUs);
@@ -1115,6 +1123,58 @@ function clipLabel(clip: Clip, entry: SourceEntry | undefined): string {
   return entry?.fileName ?? clip.sourceId;
 }
 
+const EFFECT_DND_MIME = "application/x-app-video-effect";
+
+/**
+ * Se dispara al soltar un ítem del panel de efectos sobre el clip
+ * `clipIndex`. Una transición se inserta justo después del clip (igual
+ * que insertTransitionButton, pero con el índice del drop en vez de
+ * selectedClipIndex); un filtro de color reemplaza el de ese clip.
+ * Nunca se aplica a huecos/transiciones — no tienen vídeo propio.
+ */
+function handleEffectDrop(event: DragEvent, clipIndex: number): void {
+  const raw = event.dataTransfer?.getData(EFFECT_DND_MIME);
+  if (!raw || !timeline) return;
+  event.preventDefault();
+  let payload: { kind: string; value: string };
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  const clip = timeline.track.clips[clipIndex];
+  if (!clip) return;
+
+  if (payload.kind === "transition") {
+    if (clip.kind !== "clip") {
+      status.textContent = "Suelta la transición sobre un clip de vídeo.";
+      return;
+    }
+    const seconds = Number(transitionDurationInput.value);
+    const durationTicks = secondsToTicks(Number.isFinite(seconds) && seconds > 0 ? seconds : 0.5);
+    const transitionType = payload.value as TransitionType;
+    const insertIndex = clipIndex + 1;
+    commitTimeline(insertClipAt(timeline, insertIndex, createTransition(`transition-${nextClipNumber++}`, durationTicks, transitionType)));
+    refreshTimelineLayout();
+    selectClip(insertIndex);
+    void seekToTimelineTicks(clipStartTicks(timeline, insertIndex));
+    status.textContent = "Transición insertada.";
+    return;
+  }
+
+  if (payload.kind === "colorFilter") {
+    if (clip.kind !== "clip") {
+      status.textContent = "Los filtros de color solo se pueden aplicar a clips de vídeo.";
+      return;
+    }
+    commitTimeline(setClipColorFilter(timeline, clipIndex, payload.value as ColorFilterType));
+    refreshTimelineLayout();
+    selectClip(clipIndex);
+    void seekToTimelineTicks(playheadTicks); // repinta el preview YA con el filtro nuevo, sin esperar al próximo scrub/play
+    status.textContent = "Filtro de color aplicado.";
+  }
+}
+
 function renderTimeline(): void {
   timelineTrack.innerHTML = "";
   if (!timeline) return;
@@ -1131,7 +1191,23 @@ function renderTimeline(): void {
       (clip.kind === "transition" ? " timeline-clip--transition" : "");
     block.style.width = `${ticksToSeconds(durationTicks) * pixelsPerSecond}px`;
     if (entry?.thumbnail) block.style.backgroundImage = `url(${entry.thumbnail})`;
+    if (clip.kind === "clip") block.style.filter = colorFilterCss(clip.colorFilter);
     block.dataset.index = String(index);
+
+    // Ver handleEffectDrop: soltar aquí un efecto arrastrado desde el
+    // panel de la izquierda lo aplica a ESTE clip — nunca un botón de
+    // "aplicar", a petición explícita del usuario.
+    block.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types.includes(EFFECT_DND_MIME)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      block.classList.add("drop-target");
+    });
+    block.addEventListener("dragleave", () => block.classList.remove("drop-target"));
+    block.addEventListener("drop", (event) => {
+      block.classList.remove("drop-target");
+      handleEffectDrop(event, index);
+    });
 
     const name = document.createElement("span");
     name.className = "clip-name";
@@ -1483,6 +1559,7 @@ function selectClip(index: number): void {
   trimInInput.value = String(ticksToSeconds(clip.sourceInTicks));
   trimOutInput.value = String(ticksToSeconds(clip.sourceOutTicks));
   clipMutedInput.checked = clip.muted;
+  clipColorFilterSelect.value = clip.colorFilter ?? "";
   trimDetails.open = true; // al seleccionar un clip, se abre solo el compartimento donde se edita
   renderTimeline();
 }
@@ -1662,6 +1739,17 @@ function applyClipMuted(): void {
 
 clipMutedInput.addEventListener("change", applyClipMuted);
 
+function applyClipColorFilter(): void {
+  if (!timeline || selectedClipIndex === undefined) return;
+  const value = clipColorFilterSelect.value;
+  commitTimeline(setClipColorFilter(timeline, selectedClipIndex, value ? (value as ColorFilterType) : undefined));
+  refreshTimelineLayout();
+  void seekToTimelineTicks(playheadTicks);
+  status.textContent = value ? "Filtro de color aplicado." : "Filtro de color quitado.";
+}
+
+clipColorFilterSelect.addEventListener("change", applyClipColorFilter);
+
 function applyOutputSettings(): void {
   if (!timeline) return;
   const width = Math.round(Number(outputWidthInput.value));
@@ -1714,6 +1802,64 @@ insertTransitionButton.addEventListener("click", () => {
   insertAfterSelected(createTransition(`transition-${nextClipNumber++}`, secondsToTicks(seconds), transitionType));
   status.textContent = "Transición insertada entre el clip anterior y el siguiente.";
 });
+
+// Panel de efectos (izquierda): cada "carpeta" es estática en el HTML,
+// solo hace falta cablear el origen del arrastre una vez — el destino
+// (cada clip de la línea de tiempo) se cablea en renderTimeline(), ya
+// que esos elementos se recrean en cada repintado.
+document.querySelectorAll<HTMLElement>(".effect-chip").forEach((chip) => {
+  chip.addEventListener("dragstart", (event) => {
+    const kind = chip.dataset.effectKind;
+    const value = chip.dataset.effectValue;
+    if (!kind || !value || !event.dataTransfer) return;
+    event.dataTransfer.setData(EFFECT_DND_MIME, JSON.stringify({ kind, value }));
+    event.dataTransfer.effectAllowed = "copy";
+  });
+});
+
+// Altura de la pista de vídeo de la línea de tiempo, ajustable
+// arrastrando #timeline-resize-handle hacia arriba/abajo — "al gusto
+// de cada uno", con la preferencia recordada entre sesiones.
+const MIN_TIMELINE_TRACK_HEIGHT = 64;
+const MAX_TIMELINE_TRACK_HEIGHT = 240;
+const TIMELINE_TRACK_HEIGHT_STORAGE_KEY = "appVideo.timelineTrackHeight";
+
+function applyTimelineTrackHeight(px: number): void {
+  const clamped = Math.max(MIN_TIMELINE_TRACK_HEIGHT, Math.min(MAX_TIMELINE_TRACK_HEIGHT, px));
+  document.documentElement.style.setProperty("--timeline-track-height", `${clamped}px`);
+  try {
+    localStorage.setItem(TIMELINE_TRACK_HEIGHT_STORAGE_KEY, String(clamped));
+  } catch {
+    // almacenamiento no disponible (modo privado, etc.) — no es crítico, solo se pierde la preferencia entre sesiones.
+  }
+}
+
+try {
+  const saved = Number(localStorage.getItem(TIMELINE_TRACK_HEIGHT_STORAGE_KEY));
+  if (Number.isFinite(saved) && saved > 0) applyTimelineTrackHeight(saved);
+} catch {
+  // ignorar — se queda con la altura por defecto del CSS.
+}
+
+timelineResizeHandle.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  const startY = event.clientY;
+  const startHeight = timelineTrack.getBoundingClientRect().height;
+  timelineResizeHandle.classList.add("dragging");
+
+  function onMove(moveEvent: PointerEvent): void {
+    // Arrastrar hacia arriba (clientY menor) agranda la timeline.
+    applyTimelineTrackHeight(startHeight + (startY - moveEvent.clientY));
+  }
+  function onUp(): void {
+    timelineResizeHandle.classList.remove("dragging");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  }
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+});
+
 playButton.addEventListener("click", playFromPlayhead);
 pauseButton.addEventListener("click", stopPlayback);
 

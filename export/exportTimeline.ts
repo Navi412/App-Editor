@@ -178,7 +178,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
         const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
         const frame = await seekerFor(position.sourceId).next(sourceTimeUs);
         if (frame) {
-          drawFrameFit(ctx, frame, { width, height });
+          drawFrameFit(ctx, frame, { width, height }, position.clip.colorFilter);
           frame.close();
         } else {
           ctx.clearRect(0, 0, width, height);

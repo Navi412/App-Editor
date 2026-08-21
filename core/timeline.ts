@@ -1,5 +1,5 @@
 import { ticksToSeconds } from "./time";
-import type { Clip, Timeline, TransitionType, Track, VolumeKeyframe } from "./types";
+import type { Clip, ColorFilterType, Timeline, TransitionType, Track, VolumeKeyframe } from "./types";
 
 /**
  * Todas las funciones de este módulo son puras: reciben una Timeline y
@@ -340,6 +340,20 @@ export function setClipAudio(
   const clampedVolume = Math.max(0, Math.min(1, volume));
   const clips = [...timeline.track.clips];
   clips[clipIndex] = { ...clip, volume: clampedVolume, muted };
+  return { ...timeline, track: { ...timeline.track, clips } };
+}
+
+/** Cambia (o quita, con undefined) el filtro de color de un clip. Ver ColorFilterType. */
+export function setClipColorFilter(
+  timeline: Timeline,
+  clipIndex: number,
+  colorFilter: ColorFilterType | undefined,
+): Timeline {
+  const clip = timeline.track.clips[clipIndex];
+  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
+  const { colorFilter: _previous, ...rest } = clip;
+  const clips = [...timeline.track.clips];
+  clips[clipIndex] = colorFilter ? { ...rest, colorFilter } : rest;
   return { ...timeline, track: { ...timeline.track, clips } };
 }
 

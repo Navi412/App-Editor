@@ -21,6 +21,45 @@
 
     <main>
      <div class="main-top">
+      <aside class="effects-panel" id="effects-panel">
+        <h2>Efectos</h2>
+        <p class="hint-inline">Arrastra un efecto sobre un clip de la línea de tiempo para aplicarlo.</p>
+        <details class="effect-folder" open>
+          <summary>🔀 Transiciones</summary>
+          <div class="effect-folder-body">
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="transition" data-effect-value="crossfade">
+              Fundido cruzado
+            </button>
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="transition" data-effect-value="dipToBlack">
+              Fundido a negro
+            </button>
+          </div>
+        </details>
+        <details class="effect-folder" open>
+          <summary>🎨 Filtros de color</summary>
+          <div class="effect-folder-body">
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="grayscale">
+              Blanco y negro
+            </button>
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="sepia">
+              Sepia
+            </button>
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="invert">
+              Invertido
+            </button>
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="warm">
+              Cálido
+            </button>
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="cool">
+              Frío
+            </button>
+            <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="highContrast">
+              Alto contraste
+            </button>
+          </div>
+        </details>
+      </aside>
+
       <div class="preview-column">
         <div class="preview-canvas-wrap" id="preview-wrap">
           <canvas id="preview"></canvas>
@@ -50,6 +89,21 @@
                 <p class="hint-inline">
                   Arrastra la pista de audio (abajo) para el volumen · Alt+clic ahí para editarlo por trozos.
                 </p>
+              </div>
+              <div class="field-group">
+                <label
+                  >Filtro de color
+                  <select id="clip-color-filter">
+                    <option value="">Ninguno</option>
+                    <option value="grayscale">Blanco y negro</option>
+                    <option value="sepia">Sepia</option>
+                    <option value="invert">Invertido</option>
+                    <option value="warm">Cálido</option>
+                    <option value="cool">Frío</option>
+                    <option value="highContrast">Alto contraste</option>
+                  </select>
+                </label>
+                <p class="hint-inline">Se aplica arrastrando un filtro desde el panel de efectos.</p>
               </div>
             </fieldset>
           </div>
@@ -176,6 +230,7 @@
       </aside>
      </div>
 
+      <div id="timeline-resize-handle" class="timeline-resize-handle" title="Arrastra para ajustar la altura de la línea de tiempo"></div>
       <div class="timeline-section">
         <div class="timeline-toolbar">
           <select id="transition-type" title="Tipo de transición">

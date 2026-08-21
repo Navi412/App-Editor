@@ -19,6 +19,14 @@ export type ClipKind = "clip" | "gap" | "transition";
 export type TransitionType = "crossfade" | "dipToBlack";
 
 /**
+ * Filtro de color aplicado a un clip entero (todo su rango recortado),
+ * como los propios fotogramas de vídeo — no hay keyframes ni variación
+ * en el tiempo, a diferencia de `volumeKeyframes`. Ampliación de
+ * alcance pedida explícitamente el 2026-08-21 (ver CLAUDE.md).
+ */
+export type ColorFilterType = "grayscale" | "sepia" | "invert" | "warm" | "cool" | "highContrast";
+
+/**
  * Un punto de volumen dentro de un clip, para subir/bajar el audio
  * "por trozos" en vez de un único volumen fijo para todo el clip. Se
  * interpola linealmente entre puntos consecutivos — ver
@@ -60,6 +68,8 @@ export interface Clip {
   transitionType?: TransitionType;
   /** Puntos de volumen dentro del clip (orden ascendente por offsetTicks) — ver VolumeKeyframe. undefined/[] = volumen plano (`volume`). */
   volumeKeyframes?: VolumeKeyframe[];
+  /** Solo relevante si kind === "clip". undefined = sin filtro (vídeo tal cual). */
+  colorFilter?: ColorFilterType;
 }
 
 /**

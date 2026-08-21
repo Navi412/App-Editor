@@ -42,9 +42,26 @@ la rampa por su cuenta. En la UI se editan Alt+clic/arrastrando
 directamente sobre la pista de audio de la línea de tiempo — no hay
 edición de keyframes de vídeo ni de otros parámetros, solo de volumen.
 
+**Filtros de color — ampliación de alcance pedida explícitamente el
+2026-08-21.** Un clip puede llevar un `colorFilter` plano (uno de un
+catálogo fijo: blanco y negro, sepia, invertido, cálido, frío, alto
+contraste — `ColorFilterType` en `core/types.ts`), aplicado a todo su
+rango recortado, sin variar en el tiempo — a diferencia de
+`volumeKeyframes`, no hay keyframes de filtro. `colorFilterCss` en
+`media/render.ts` es el único sitio que traduce el filtro a la sintaxis
+CSS `filter()` de Canvas 2D; tanto el preview en vivo como la
+exportación pasan por `drawFrameFit` con ese mismo valor, así que no
+pueden divergir en qué se ve. Se aplica arrastrando un ítem desde el
+panel de efectos (a la izquierda del preview) hasta un clip de la
+línea de tiempo — nunca con un botón de "aplicar", a petición explícita
+del usuario; quitarlo sí tiene un `<select>` en el panel de recorte,
+porque dejar el filtro sin ninguna forma de retirarlo sería una trampa
+de usabilidad. Las transiciones (ya en alcance) se insertan de la
+misma forma, arrastradas desde ese mismo panel.
+
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
-ampliarlo:** efectos/filtros de vídeo, multipista de vídeo (varios
-clips de vídeo superpuestos), cambios de velocidad.
+ampliarlo:** multipista de vídeo (varios clips de vídeo superpuestos),
+cambios de velocidad.
 
 No añadas nada de la lista de "fuera de alcance" aunque parezca trivial
 — si aparece la tentación, es señal de que hay que parar y preguntar,

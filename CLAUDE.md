@@ -83,10 +83,30 @@ sincronización.
           (vídeo y audio en el mismo archivo). Consume /core y /media,
           no al revés.
 /ui       DOM, controles de línea de tiempo, reproductor de previsualización.
+/electron Proceso principal de Electron (electron/main.cjs) — empaqueta
+          la app web como aplicación de escritorio real. Sin preload ni
+          IPC: el renderer usa solo APIs web estándar (File, Canvas,
+          WebCodecs, Web Audio), nunca Node — contextIsolation: true,
+          nodeIntegration: false.
 /tests    tests de integración que sí tocan archivos de vídeo reales
           (fixtures pequeños). Los tests unitarios de /core viven junto
           al código que testean, no aquí.
 ```
+
+## Empaquetado de escritorio
+
+`npm run electron:start` compila y abre la app en una ventana de
+Electron (Chromium empaquetado, no WebView2 — evita depender de la
+versión de WebView2 instalada en cada máquina para WebCodecs/
+OffscreenCanvas). `npm run electron:build` genera un instalador con
+electron-builder — en esta máquina falla por un problema conocido de
+electron-builder en Windows sin el Modo de desarrollador activado
+(necesita crear symlinks para herramientas de macOS que no usamos). El
+empaquetado manual (copiar `node_modules/electron/dist`, renombrar
+`electron.exe`, y colocar `dist/` + `electron/main.cjs` + un
+`package.json` mínimo en `resources/app/`) es el método oficial de
+Electron para "manual packaging" y no necesita esos privilegios — es
+el que se usó para generar la copia del Escritorio.
 
 Dependencias en una sola dirección: `ui → export → media → core`, y
 `core` no depende de nada del proyecto. Si algún día `core` necesita

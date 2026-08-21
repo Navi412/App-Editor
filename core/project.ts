@@ -78,15 +78,26 @@ function isProjectSource(value: unknown): value is ProjectSource {
   );
 }
 
-function isClip(value: unknown): value is Clip {
+/** Acepta clips sin `volume`/`muted` (proyectos guardados antes de que existieran esos campos) — se normalizan en parseProjectFile. */
+function isClip(value: unknown): value is Omit<Clip, "volume" | "muted"> & Partial<Pick<Clip, "volume" | "muted">> {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
     typeof v.id === "string" &&
     typeof v.sourceId === "string" &&
     isFiniteNumber(v.sourceInTicks) &&
-    isFiniteNumber(v.sourceOutTicks)
+    isFiniteNumber(v.sourceOutTicks) &&
+    (v.volume === undefined || isFiniteNumber(v.volume)) &&
+    (v.muted === undefined || typeof v.muted === "boolean")
   );
+}
+
+function normalizeClip(clip: Omit<Clip, "volume" | "muted"> & Partial<Pick<Clip, "volume" | "muted">>): Clip {
+  return {
+    ...clip,
+    volume: clip.volume ?? 1,
+    muted: clip.muted ?? false,
+  };
 }
 
 function isMarker(value: unknown): value is Marker {
@@ -146,7 +157,7 @@ export function parseProjectFile(data: unknown): ProjectFile {
     outputResolution: obj.outputResolution,
     outputFrameRate: obj.outputFrameRate,
     sources: obj.sources,
-    clips: obj.clips,
+    clips: obj.clips.map(normalizeClip),
     markers,
     textOverlays,
   };

@@ -163,6 +163,14 @@ main {
   gap: 0.5rem;
 }
 
+.checkbox-row {
+  justify-content: flex-start !important;
+}
+
+.checkbox-row input[type="checkbox"] {
+  margin: 0 0.4rem 0 0;
+}
+
 .shortcuts {
   list-style: none;
   margin: 0;

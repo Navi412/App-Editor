@@ -7,7 +7,9 @@ function sampleTimeline(): Timeline {
   return {
     track: {
       id: "track-1",
-      clips: [{ id: "clip-1", sourceId: "source-1", sourceInTicks: 0, sourceOutTicks: 600000 }],
+      clips: [
+        { id: "clip-1", sourceId: "source-1", sourceInTicks: 0, sourceOutTicks: 600000, volume: 1, muted: false },
+      ],
     },
     outputResolution: { width: 1920, height: 1080 },
     outputFrameRate: { numerator: 30, denominator: 1 },
@@ -62,6 +64,14 @@ describe("serializeProject / parseProjectFile", () => {
     const parsed = parseProjectFile(JSON.parse(JSON.stringify(withoutOptionals)));
     expect(parsed.markers).toEqual([]);
     expect(parsed.textOverlays).toEqual([]);
+  });
+
+  it("normaliza clips guardados antes de que existieran volume/muted a volume:1, muted:false", () => {
+    const timeline = sampleTimeline();
+    const serialized = serializeProject(timeline, sampleSources(), [], []);
+    const oldClip = { id: "clip-1", sourceId: "source-1", sourceInTicks: 0, sourceOutTicks: 600000 };
+    const parsed = parseProjectFile({ ...serialized, clips: [oldClip] });
+    expect(parsed.clips).toEqual([{ ...oldClip, volume: 1, muted: false }]);
   });
 
   it("lanza si la versión no es 1", () => {

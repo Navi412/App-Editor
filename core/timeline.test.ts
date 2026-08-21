@@ -4,8 +4,10 @@ import {
   appendClip,
   clipDurationTicks,
   clipStartTicks,
+  effectiveClipVolume,
   removeClip,
   reorderClip,
+  setClipAudio,
   splitClipAt,
   timelineDurationTicks,
   trimClipIn,
@@ -20,6 +22,8 @@ function clip(id: string, sourceId: string, inSec: number, outSec: number): Clip
     sourceId,
     sourceInTicks: secondsToTicks(inSec),
     sourceOutTicks: secondsToTicks(outSec),
+    volume: 1,
+    muted: false,
   };
 }
 
@@ -219,5 +223,32 @@ describe("clipStartTicks", () => {
     const timeline = twoClipTimeline();
     expect(() => clipStartTicks(timeline, 2)).toThrow(RangeError);
     expect(() => clipStartTicks(timeline, -1)).toThrow(RangeError);
+  });
+});
+
+describe("setClipAudio / effectiveClipVolume", () => {
+  it("actualiza volumen y muted del clip indicado, sin tocar los demás", () => {
+    const timeline = twoClipTimeline();
+    const next = setClipAudio(timeline, 0, 0.5, true);
+    expect(next.track.clips[0]!.volume).toBe(0.5);
+    expect(next.track.clips[0]!.muted).toBe(true);
+    expect(next.track.clips[1]!.volume).toBe(1);
+    expect(next.track.clips[1]!.muted).toBe(false);
+  });
+
+  it("recorta el volumen al rango [0, 1]", () => {
+    const timeline = twoClipTimeline();
+    expect(setClipAudio(timeline, 0, 1.5, false).track.clips[0]!.volume).toBe(1);
+    expect(setClipAudio(timeline, 0, -0.5, false).track.clips[0]!.volume).toBe(0);
+  });
+
+  it("lanza con un índice fuera de rango", () => {
+    const timeline = twoClipTimeline();
+    expect(() => setClipAudio(timeline, 5, 1, false)).toThrow(RangeError);
+  });
+
+  it("effectiveClipVolume es 0 si el clip está silenciado, independientemente de volume", () => {
+    expect(effectiveClipVolume({ ...clip("a", "s", 0, 1), volume: 0.8, muted: true })).toBe(0);
+    expect(effectiveClipVolume({ ...clip("a", "s", 0, 1), volume: 0.8, muted: false })).toBe(0.8);
   });
 });

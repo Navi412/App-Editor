@@ -2,8 +2,10 @@ import { frameDurationTicks, secondsToTicks, ticksToSeconds } from "../core/time
 import {
   appendClip,
   clipStartTicks,
+  effectiveClipVolume,
   removeClip,
   reorderClip,
+  setClipAudio,
   splitClipAt,
   timelineDurationTicks,
   trimClipIn,
@@ -13,9 +15,10 @@ import {
 import { parseProjectFile, serializeProject, type ProjectFile, type ProjectSource } from "../core/project";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import type { Clip, SourceFile, Timeline } from "../core/types";
-import { exportTimelineToMp4 } from "../export/exportTimeline";
+import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
 import { decodeAudioAsset } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
+import { getDecoderDescription } from "../media/description";
 import { createVideoPlayer, type VideoPlayer } from "../media/player";
 import { drawFrameFit } from "../media/render";
 import { decodeAllSamples, type DemuxedTrack } from "../media/samples";
@@ -64,6 +67,13 @@ const trimControls = requireElement<HTMLFieldSetElement>("#trim-controls");
 const trimInInput = requireElement<HTMLInputElement>("#trim-in");
 const trimOutInput = requireElement<HTMLInputElement>("#trim-out");
 const applyTrimButton = requireElement<HTMLButtonElement>("#apply-trim");
+const clipVolumeInput = requireElement<HTMLInputElement>("#clip-volume");
+const clipMutedInput = requireElement<HTMLInputElement>("#clip-muted");
+const outputControls = requireElement<HTMLFieldSetElement>("#output-controls");
+const outputWidthInput = requireElement<HTMLInputElement>("#output-width");
+const outputHeightInput = requireElement<HTMLInputElement>("#output-height");
+const outputFpsInput = requireElement<HTMLInputElement>("#output-fps");
+const applyOutputButton = requireElement<HTMLButtonElement>("#apply-output");
 const addMarkerButton = requireElement<HTMLButtonElement>("#add-marker-button");
 const markerList = requireElement<HTMLUListElement>("#marker-list");
 const textContentInput = requireElement<HTMLInputElement>("#text-content");
@@ -82,6 +92,7 @@ const previewZoomButton = requireElement<HTMLButtonElement>("#preview-zoom-butto
 const canvas = requireElement<HTMLCanvasElement>("#preview");
 const status = requireElement<HTMLSpanElement>("#status");
 const exportButton = requireElement<HTMLButtonElement>("#export-button");
+const cancelExportButton = requireElement<HTMLButtonElement>("#cancel-export-button");
 const exportStatus = requireElement<HTMLParagraphElement>("#export-status");
 const exportDownload = requireElement<HTMLParagraphElement>("#export-download");
 const scrubTooltip = requireElement<HTMLDivElement>("#scrub-tooltip");
@@ -173,6 +184,8 @@ function afterHistoryChange(): void {
     const clip = timeline.track.clips[selectedClipIndex]!;
     trimInInput.value = String(ticksToSeconds(clip.sourceInTicks));
     trimOutInput.value = String(ticksToSeconds(clip.sourceOutTicks));
+    clipVolumeInput.value = String(clip.volume);
+    clipMutedInput.checked = clip.muted;
   }
   void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
   updateHistoryButtons();
@@ -280,10 +293,11 @@ async function playClipFrom(clipIndex: number, offsetTicks: number): Promise<voi
   await player.seekTo(startUs);
 
   const entry = sources.get(clip.sourceId);
-  if (entry?.audio) {
+  const gain = effectiveClipVolume(clip);
+  if (entry?.audio && gain > 0) {
     if (audioContext.state === "suspended") await audioContext.resume();
     const durationSeconds = ticksToSeconds(clip.sourceOutTicks) - startSeconds;
-    activeAudioHandle = playAudioSlice(audioContext, entry.audio, startSeconds, durationSeconds, audioContext.currentTime);
+    activeAudioHandle = playAudioSlice(audioContext, entry.audio, startSeconds, durationSeconds, audioContext.currentTime, gain);
   }
 
   player.play(endUs);
@@ -468,10 +482,40 @@ function renderRuler(): void {
   }
 }
 
+/** Ticks de inicio de cada clip más el final de la timeline — puntos de corte "naturales" para el imán del playhead. */
+function clipBoundaryTicks(): number[] {
+  if (!timeline) return [];
+  const bounds: number[] = [];
+  let cursor = 0;
+  for (const clip of timeline.track.clips) {
+    bounds.push(cursor);
+    cursor += clip.sourceOutTicks - clip.sourceInTicks;
+  }
+  bounds.push(cursor);
+  return bounds;
+}
+
+/** Ajusta `ticks` al candidato más cercano (borde de clip o marcador) si cae dentro del umbral de imán en píxeles. */
+function snapTimelineTicks(ticks: number): number {
+  const snapThresholdTicks = Math.max(1, secondsToTicks(SNAP_PIXELS / pixelsPerSecond));
+  const candidates = [...clipBoundaryTicks(), ...markers.map((marker) => marker.ticks)];
+  let best = ticks;
+  let bestDelta = snapThresholdTicks;
+  for (const candidate of candidates) {
+    const delta = Math.abs(ticks - candidate);
+    if (delta <= bestDelta) {
+      bestDelta = delta;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
 function ticksAtClientX(clientX: number): number {
   const rect = timelineTrack.getBoundingClientRect();
   const seconds = Math.max(0, (clientX - rect.left) / pixelsPerSecond);
-  return Math.max(0, Math.min(secondsToTicks(seconds), Math.max(timelineTotalTicks - 1, 0)));
+  const raw = Math.max(0, Math.min(secondsToTicks(seconds), Math.max(timelineTotalTicks - 1, 0)));
+  return snapTimelineTicks(raw);
 }
 
 function showFloatingTooltip(clientX: number, clientY: number, text: string): void {
@@ -735,6 +779,8 @@ function selectClip(index: number): void {
   selectedClipIndex = index;
   trimInInput.value = String(ticksToSeconds(clip.sourceInTicks));
   trimOutInput.value = String(ticksToSeconds(clip.sourceOutTicks));
+  clipVolumeInput.value = String(clip.volume);
+  clipMutedInput.checked = clip.muted;
   renderTimeline();
 }
 
@@ -763,6 +809,7 @@ function removeClipAt(index: number): void {
 
 function enableEditingControls(): void {
   trimControls.disabled = false;
+  outputControls.disabled = false;
   playButton.disabled = false;
   splitButton.disabled = false;
   exportButton.disabled = false;
@@ -791,6 +838,14 @@ async function addClipFromFile(file: File): Promise<void> {
   status.textContent = `Cargando ${file.name}...`;
   try {
     const { videoTrack, samples } = await decodeAllSamples(file);
+    const firstSample = samples[0];
+    if (!firstSample) {
+      throw new Error("El archivo no tiene ningún fotograma de vídeo");
+    }
+    // Falla pronto y con un mensaje claro si el códec no es compatible
+    // (solo H.264/H.265, ver media/description.ts), en vez de añadir un
+    // clip que luego fallará en silencio al reproducirlo o exportarlo.
+    getDecoderDescription(firstSample);
     const demuxed = { videoTrack, samples };
     const sourceId = `source-${nextSourceNumber++}`;
     const sourceFile = toSourceFile(sourceId, videoTrack, samples);
@@ -813,6 +868,8 @@ async function addClipFromFile(file: File): Promise<void> {
       sourceId,
       sourceInTicks: 0,
       sourceOutTicks: sourceFile.durationTicks,
+      volume: 1,
+      muted: false,
     };
 
     if (!timeline) {
@@ -823,6 +880,9 @@ async function addClipFromFile(file: File): Promise<void> {
       });
       canvas.width = sourceFile.width;
       canvas.height = sourceFile.height;
+      outputWidthInput.value = String(sourceFile.width);
+      outputHeightInput.value = String(sourceFile.height);
+      outputFpsInput.value = String(sourceFile.frameRate.numerator / sourceFile.frameRate.denominator);
     } else {
       commitTimeline(appendClip(timeline, clip));
     }
@@ -879,6 +939,44 @@ applyTrimButton.addEventListener("click", () => {
   void seekToTimelineTicks(clipStartTicks(timeline, selectedClipIndex));
   status.textContent = "Recorte aplicado.";
 });
+
+function applyClipAudioControls(): void {
+  if (!timeline || selectedClipIndex === undefined) return;
+  const volume = Number(clipVolumeInput.value);
+  const muted = clipMutedInput.checked;
+  commitTimeline(setClipAudio(timeline, selectedClipIndex, volume, muted));
+  status.textContent = muted ? "Clip silenciado." : "Volumen del clip actualizado.";
+}
+
+clipVolumeInput.addEventListener("change", applyClipAudioControls);
+clipMutedInput.addEventListener("change", applyClipAudioControls);
+
+function applyOutputSettings(): void {
+  if (!timeline) return;
+  const width = Math.round(Number(outputWidthInput.value));
+  const height = Math.round(Number(outputHeightInput.value));
+  const fps = Number(outputFpsInput.value);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    status.textContent = "Resolución de salida inválida.";
+    return;
+  }
+  if (!Number.isFinite(fps) || fps <= 0) {
+    status.textContent = "Fotogramas/s de salida inválidos.";
+    return;
+  }
+  commitTimeline({
+    ...timeline,
+    outputResolution: { width, height },
+    outputFrameRate: { numerator: Math.round(fps * 1000), denominator: 1000 },
+  });
+  canvas.width = width;
+  canvas.height = height;
+  refreshTimelineLayout();
+  void seekToTimelineTicks(playheadTicks);
+  status.textContent = "Configuración de salida aplicada.";
+}
+
+applyOutputButton.addEventListener("click", applyOutputSettings);
 
 splitButton.addEventListener("click", splitAtPlayhead);
 deleteClipButton.addEventListener("click", () => {
@@ -1074,9 +1172,13 @@ exportButton.addEventListener("click", () => {
   void runExport(timeline);
 });
 
+let exportAbortController: AbortController | undefined;
+
 async function runExport(timelineToExport: Timeline): Promise<void> {
   stopPlayback();
   exportButton.disabled = true;
+  cancelExportButton.hidden = false;
+  exportAbortController = new AbortController();
   exportStatus.textContent = "Exportando...";
   exportDownload.innerHTML = "";
   try {
@@ -1085,6 +1187,7 @@ async function runExport(timelineToExport: Timeline): Promise<void> {
       getSource: (sourceId) => sources.get(sourceId)?.demuxed,
       getAudio: (sourceId) => sources.get(sourceId)?.audio,
       textOverlays,
+      signal: exportAbortController.signal,
       onProgress: (done, total) => {
         exportStatus.textContent = `Exportando... ${done}/${total} fotogramas`;
       },
@@ -1097,12 +1200,22 @@ async function runExport(timelineToExport: Timeline): Promise<void> {
     exportDownload.appendChild(link);
     exportStatus.textContent = "Exportación completa.";
   } catch (error) {
-    console.error(error);
-    exportStatus.textContent = `Error de exportación: ${error instanceof Error ? error.message : String(error)}`;
+    if (error instanceof ExportCancelledError) {
+      exportStatus.textContent = "Exportación cancelada.";
+    } else {
+      console.error(error);
+      exportStatus.textContent = `Error de exportación: ${error instanceof Error ? error.message : String(error)}`;
+    }
   } finally {
     exportButton.disabled = false;
+    cancelExportButton.hidden = true;
+    exportAbortController = undefined;
   }
 }
+
+cancelExportButton.addEventListener("click", () => {
+  exportAbortController?.abort();
+});
 
 // --- Guardar / cargar proyecto ---
 // El JSON no lleva los bytes de vídeo (serían enormes) — solo la
@@ -1178,6 +1291,11 @@ async function applyPendingProject(project: ProjectFile, files: File[]): Promise
     for (const projectSource of project.sources) {
       const file = byName.get(projectSource.fileName)!;
       const { videoTrack, samples } = await decodeAllSamples(file);
+      const firstSample = samples[0];
+      if (!firstSample) {
+        throw new Error(`${projectSource.fileName} no tiene ningún fotograma de vídeo`);
+      }
+      getDecoderDescription(firstSample);
       const demuxed = { videoTrack, samples };
       const thumbnail = await generateThumbnail(demuxed).catch((error: unknown) => {
         console.warn("No se pudo generar la miniatura del clip:", error);
@@ -1226,6 +1344,9 @@ async function applyPendingProject(project: ProjectFile, files: File[]): Promise
 
   canvas.width = project.outputResolution.width;
   canvas.height = project.outputResolution.height;
+  outputWidthInput.value = String(project.outputResolution.width);
+  outputHeightInput.value = String(project.outputResolution.height);
+  outputFpsInput.value = String(project.outputFrameRate.numerator / project.outputFrameRate.denominator);
 
   enableEditingControls();
   nextSourceNumber = newSources.size + 1;

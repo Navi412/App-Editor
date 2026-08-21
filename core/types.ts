@@ -26,6 +26,10 @@ export interface Clip {
   sourceInTicks: number;
   /** Punto de salida (exclusivo), en ticks, dentro del tiempo del SourceFile. */
   sourceOutTicks: number;
+  /** Ganancia de audio del clip, 0-1. Por defecto 1 (sin atenuar). */
+  volume: number;
+  /** Si está silenciado, el audio del clip no suena ni se exporta, independientemente de `volume`. */
+  muted: boolean;
 }
 
 /**

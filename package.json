@@ -3,19 +3,38 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "electron:start": "vite build && electron .",
+    "electron:build": "vite build && electron-builder"
   },
   "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.5.4",
     "vite": "^5.4.11",
     "vitest": "^2.1.5"
   },
   "dependencies": {
     "mp4box": "^2.4.1"
+  },
+  "build": {
+    "appId": "com.ivanmv.appvideo",
+    "productName": "App Video",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }

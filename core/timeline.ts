@@ -205,3 +205,23 @@ export function trimClipOut(
   clips[clipIndex] = { ...clip, sourceOutTicks: newSourceOutTicks };
   return { ...timeline, track: { ...timeline.track, clips } };
 }
+
+/** Ganancia de audio (0-1, se recorta a ese rango) y silencio de un clip. */
+export function setClipAudio(
+  timeline: Timeline,
+  clipIndex: number,
+  volume: number,
+  muted: boolean,
+): Timeline {
+  const clip = timeline.track.clips[clipIndex];
+  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
+  const clampedVolume = Math.max(0, Math.min(1, volume));
+  const clips = [...timeline.track.clips];
+  clips[clipIndex] = { ...clip, volume: clampedVolume, muted };
+  return { ...timeline, track: { ...timeline.track, clips } };
+}
+
+/** Ganancia efectiva de un clip para reproducción/exportación: 0 si está silenciado. */
+export function effectiveClipVolume(clip: Clip): number {
+  return clip.muted ? 0 : clip.volume;
+}

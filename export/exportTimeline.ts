@@ -1,5 +1,5 @@
 import { frameDurationTicks, ticksToSeconds } from "../core/time";
-import { timelineDurationTicks, walkTimeline } from "../core/timeline";
+import { effectiveClipVolume, timelineDurationTicks, walkTimeline } from "../core/timeline";
 import type { Timeline } from "../core/types";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import { drawFrameFit } from "../media/render";
@@ -15,6 +15,17 @@ const AUDIO_SAMPLE_RATE = 48_000;
 const AUDIO_CHANNELS = 2;
 const AUDIO_BITRATE = 128_000;
 const AUDIO_FRAME_SIZE = 1024;
+
+export class ExportCancelledError extends Error {
+  constructor() {
+    super("Exportación cancelada");
+    this.name = "ExportCancelledError";
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ExportCancelledError();
+}
 
 // Candidatos de códec en orden de preferencia (perfil/nivel de mayor a
 // menor capacidad). Un nivel alto (p.ej. High 4.0) puede no soportar
@@ -47,6 +58,8 @@ export interface ExportOptions {
   textOverlays?: TextOverlay[];
   onProgress?: (framesDone: number, totalFrames: number) => void;
   bitrate?: number;
+  /** Si se aborta, la exportación se detiene lanzando ExportCancelledError en el siguiente punto de comprobación (por fotograma de vídeo, o por bloque de audio). */
+  signal?: AbortSignal;
 }
 
 /**
@@ -60,7 +73,7 @@ export interface ExportOptions {
  * secuencial con un único FrameSeeker por fuente — ver media/frameSeeker.ts.
  */
 export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob> {
-  const { timeline, getSource, getAudio, textOverlays = [], onProgress } = options;
+  const { timeline, getSource, getAudio, textOverlays = [], onProgress, signal } = options;
   const { width, height } = timeline.outputResolution;
   const outputFrameRate = timeline.outputFrameRate;
   const totalTicks = timelineDurationTicks(timeline);
@@ -111,6 +124,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
 
   try {
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+      throwIfAborted(signal);
       const timelineTicks = frameIndex * stepTicks;
       const position = walkTimeline(timeline, timelineTicks);
       if (!position) break;
@@ -149,7 +163,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
     await encoder.flush();
 
     if (getAudio) {
-      await exportAudioTrack(timeline, getAudio, muxer);
+      await exportAudioTrack(timeline, getAudio, muxer, signal);
     }
   } finally {
     encoder.close();
@@ -177,14 +191,18 @@ async function renderExportAudio(timeline: Timeline, getAudio: (sourceId: string
   for (const clip of timeline.track.clips) {
     const durationSeconds = ticksToSeconds(clip.sourceOutTicks - clip.sourceInTicks);
     const sourceBuffer = getAudio(clip.sourceId);
-    if (sourceBuffer && durationSeconds > 0) {
+    const gain = effectiveClipVolume(clip);
+    if (sourceBuffer && durationSeconds > 0 && gain > 0) {
       const offsetSeconds = ticksToSeconds(clip.sourceInTicks);
       const safeOffset = Math.max(0, Math.min(offsetSeconds, sourceBuffer.duration));
       const safeDuration = Math.max(0, Math.min(durationSeconds, sourceBuffer.duration - safeOffset));
       if (safeDuration > 0) {
         const bufferSource = offline.createBufferSource();
         bufferSource.buffer = sourceBuffer;
-        bufferSource.connect(offline.destination);
+        const gainNode = offline.createGain();
+        gainNode.gain.value = gain;
+        bufferSource.connect(gainNode);
+        gainNode.connect(offline.destination);
         bufferSource.start(cursorSeconds, safeOffset, safeDuration);
       }
     }
@@ -198,6 +216,7 @@ async function exportAudioTrack(
   timeline: Timeline,
   getAudio: (sourceId: string) => AudioBuffer | undefined,
   muxer: Mp4Muxer,
+  signal: AbortSignal | undefined,
 ): Promise<void> {
   const hasAnyAudio = timeline.track.clips.some((clip) => getAudio(clip.sourceId) !== undefined);
   if (!hasAnyAudio) return;
@@ -233,6 +252,7 @@ async function exportAudioTrack(
 
   try {
     for (let start = 0; start < buffer.length; start += AUDIO_FRAME_SIZE) {
+      throwIfAborted(signal);
       const frameLength = Math.min(AUDIO_FRAME_SIZE, buffer.length - start);
       const planar = new Float32Array(frameLength * buffer.numberOfChannels);
       for (let channel = 0; channel < buffer.numberOfChannels; channel++) {

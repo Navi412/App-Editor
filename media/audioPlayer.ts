@@ -16,10 +16,14 @@ export function playAudioSlice(
   offsetSeconds: number,
   durationSeconds: number,
   when: number,
+  gain = 1,
 ): AudioPlaybackHandle {
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
-  source.connect(audioContext.destination);
+  const gainNode = audioContext.createGain();
+  gainNode.gain.value = gain;
+  source.connect(gainNode);
+  gainNode.connect(audioContext.destination);
   const safeOffset = Math.max(0, Math.min(offsetSeconds, buffer.duration));
   const safeDuration = Math.max(0, Math.min(durationSeconds, buffer.duration - safeOffset));
   source.start(when, safeOffset, safeDuration);
@@ -34,6 +38,7 @@ export function playAudioSlice(
         // ya estaba parado (llegó al final por sí solo) — no pasa nada
       }
       source.disconnect();
+      gainNode.disconnect();
     },
   };
 }

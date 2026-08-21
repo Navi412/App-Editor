@@ -36,6 +36,7 @@ export function inferFrameRate(samples: Sample[], timescale: number): FrameRate 
 export function toSourceFile(id: string, videoTrack: Track, samples: Sample[]): SourceFile {
   return {
     id,
+    kind: "video",
     frameRate: inferFrameRate(samples, videoTrack.timescale),
     width: videoTrack.video?.width ?? 0,
     height: videoTrack.video?.height ?? 0,

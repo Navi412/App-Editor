@@ -7,25 +7,62 @@ explícita del usuario a medida que el proyecto avanza.
 
 ## Alcance
 
-Una sola pista de vídeo, con su pista de audio asociada (el audio de
-cada clip viaja pegado a su vídeo — mismo `sourceId`, mismo recorte;
-no es una pista independiente que se pueda desincronizar). Cargar
-clips, recortar entrada/salida, ordenar, cortar (split), añadir texto
-superpuesto (arrastrable en el preview, con tipografía elegible),
-dejar huecos entre clips, transiciones básicas entre clips (fundido
-cruzado / fundido a negro), previsualizar (con sonido), exportar a MP4
-(con audio).
+Varias pistas de vídeo y de audio, añadibles/quitables por el usuario
+(botones "+ pista de vídeo"/"+ pista de audio" junto a la línea de
+tiempo). Cargar clips, recortar entrada/salida, mover clips en el
+tiempo, cortar (split), añadir texto superpuesto (arrastrable en el
+preview, con tipografía elegible), huecos entre clips, transiciones
+básicas entre clips de una misma pista (fundido cruzado / fundido a
+negro), previsualizar (con sonido), exportar a MP4 (con audio).
 
-**Huecos y transiciones — ampliación de alcance pedida explícitamente
-el 2026-08-21.** Se modelan como ya anticipaba `DESIGN.md` §1: un
-"hueco" o una "transición" es un `Clip` especial más en el array
-(`kind: "gap" | "transition"`), nunca un campo de posición aparte —
-mantiene la misma invariante "ripple" de siempre (reordenar/cortar
-siguen siendo operaciones de array puras). Una transición no reproduce
-vídeo propio: congela el último fotograma del clip anterior y el
-primero del siguiente y hace un fundido entre ambos durante su propia
-duración — es la versión "básica" pedida, no una transición con
-movimiento real dentro de la propia transición.
+**Multipista, audio independiente y huecos como espacio implícito —
+ampliación de alcance pedida explícitamente el 2026-08-21.** Sustituye
+por completo el modelo anterior de una única pista con el audio de
+cada clip pegado a su vídeo:
+
+- `Timeline.tracks: Track[]` (antes `Timeline.track: Track` singular).
+  El orden del array es el orden de composición: índice más alto =
+  capa más arriba. `Track.kind` es `"video"` o `"audio"`; `Track.hidden`
+  excluye la pista entera de previsualización/exportación (icono ojo
+  en vídeo, altavoz/mute en audio — misma semántica: vídeo oculto
+  también silencia el audio pegado a sus clips).
+- **Composición de vídeo**: capas opacas. Se recorre `Timeline.tracks`
+  de arriba a abajo y se dibuja la primera pista de vídeo no oculta que
+  tenga un clip en ese instante (`resolveActiveVideoPosition` en
+  `core/timeline.ts`) — sin mezcla alfa real. Si ninguna tiene
+  contenido, negro.
+- **Mezcla de audio**: TODAS las pistas no ocultas suenan a la vez y se
+  mezclan — tanto el audio pegado a los clips de las pistas de vídeo
+  (independientemente de si están tapadas visualmente por una pista de
+  vídeo superior) como los clips propios de las pistas de audio. El
+  audio no tiene concepto de "capas que se tapan".
+- **Pistas de audio con clips independientes**: ya no todo audio va
+  forzosamente pegado a un clip de vídeo con el mismo `sourceId`. Una
+  pista de audio lleva sus propios `Clip` (mismo tipo, sin vídeo
+  asociado) — hoy solo pueden contener audio de fuentes de vídeo ya
+  cargadas (importar un archivo de solo audio, p.ej. mp3, sigue fuera
+  de alcance salvo que se pida ampliarlo aparte).
+- **`Clip.startTicks`** sustituye el modelo "ripple" anterior (posición
+  derivada de sumar las duraciones de los clips previos en el array):
+  cada clip guarda su posición absoluta de inicio en su pista. Un
+  hueco ya NO es un objeto (`kind: "gap"` ha desaparecido) — es
+  simplemente el tramo sin clip entre dos posiciones. Mover un clip
+  (`moveClipTo`) solo cambia su `startTicks`, con tope contra sus
+  vecinos inmediatos de la MISMA pista (nunca solapamiento parcial, ni
+  "pasar a través" de un vecino); recortar (`trimClipIn`/`trimClipOut`)
+  ya no desplaza automáticamente al resto de la pista (sin ripple
+  automático) — el hueco que deja o cierra un recorte es siempre
+  explícito.
+- **Arrastrar un clip entre pistas no está soportado** — un clip se
+  queda en la pista en la que se creó. Es una decisión de alcance
+  deliberada para acotar el tamaño de esta ampliación, no un olvido; se
+  puede pedir como ampliación aparte.
+- Las transiciones siguen siendo un concepto por-pista-de-vídeo (funden
+  entre los dos clips vecinos de SU MISMA pista): no reproducen vídeo
+  propio, congelan el último fotograma del clip anterior y el primero
+  del siguiente y funden entre ambos durante su propia duración — la
+  vecindad se resuelve por coincidencia exacta de posición
+  (`neighborsOfTransition`), no por adyacencia de índice de array.
 
 **Volumen por trozos dentro de un clip — ampliación de alcance pedida
 explícitamente el 2026-08-21.** Un clip puede llevar, además de su
@@ -60,7 +97,8 @@ de usabilidad. Las transiciones (ya en alcance) se insertan de la
 misma forma, arrastradas desde ese mismo panel.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
-ampliarlo:** multipista de vídeo (varios clips de vídeo superpuestos),
+ampliarlo:** arrastrar un clip de una pista a otra, importar archivos
+de solo audio (mp3/wav) como fuente propia para una pista de audio,
 cambios de velocidad.
 
 No añadas nada de la lista de "fuera de alcance" aunque parezca trivial
@@ -117,10 +155,11 @@ sincronización.
 ## Estructura
 
 ```
-/core     modelo de línea de tiempo, Clip, Track, Timeline; aritmética de
-          tiempo (ticks ↔ segundos ↔ índice de fotograma de una fuente);
-          operaciones puras: cortar, reordenar, recortar in/out.
-          Cero dependencias de WebCodecs/mp4box/DOM.
+/core     modelo de línea de tiempo, Clip, Track (multipista), Timeline;
+          aritmética de tiempo (ticks ↔ segundos ↔ índice de fotograma
+          de una fuente); operaciones puras: mover, cortar, recortar
+          in/out, gestionar pistas. Cero dependencias de
+          WebCodecs/mp4box/DOM.
 /media    decodificación de vídeo (WebCodecs + mp4box.js) y de audio
           (Web Audio API, decodeAudioData), caché de fotogramas,
           gestión del pool de VideoDecoder. Sabe leer archivos reales.

@@ -15,7 +15,7 @@
       <button id="load-project-button" type="button" title="Cargar proyecto">📂 Cargar</button>
       <input id="project-file-input" type="file" accept="application/json,.json" hidden />
       <input id="project-sources-input" type="file" accept="video/mp4" multiple hidden />
-      <span class="hint">Arrastra un clip para moverlo (crea o cierra huecos) · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
+      <span class="hint">Arrastra un clip para moverlo (deja o cierra huecos) · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
     </header>
     <p id="project-status" class="project-status"></p>
 
@@ -240,6 +240,12 @@
           <label class="toolbar-inline"
             >Duración transición (s) <input id="transition-duration" type="number" step="0.1" min="0.1" value="0.5"
           /></label>
+          <button id="add-video-track-button" type="button" disabled title="Añadir una pista de vídeo">
+            + Pista de vídeo
+          </button>
+          <button id="add-audio-track-button" type="button" disabled title="Añadir una pista de audio">
+            + Pista de audio
+          </button>
           <span class="spacer"></span>
           <button id="zoom-out-button" type="button" disabled title="Alejar">− Zoom</button>
           <button id="zoom-fit-button" type="button" disabled title="Ajustar a la ventana">Ajustar</button>
@@ -267,8 +273,7 @@
           <div id="timeline-scroll" class="timeline-scroll">
             <div id="timeline-content" class="timeline-content">
               <div id="timeline-ruler" class="timeline-ruler"></div>
-              <div id="timeline-track" class="timeline-track"></div>
-              <div id="timeline-audio-track" class="timeline-audio-track"></div>
+              <div id="timeline-tracks" class="timeline-tracks"></div>
               <div id="timeline-text-track" class="timeline-text-track"></div>
               <div id="timeline-playhead" class="timeline-playhead"></div>
             </div>

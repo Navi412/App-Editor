@@ -1,5 +1,5 @@
 import { ticksToSeconds } from "./time";
-import type { Clip, ColorFilterType, Timeline, TransitionType, Track, VolumeKeyframe } from "./types";
+import type { Clip, ColorFilterType, Timeline, Track, TrackKind, TransitionType, VolumeKeyframe } from "./types";
 
 /**
  * Todas las funciones de este módulo son puras: reciben una Timeline y
@@ -12,111 +12,176 @@ export function clipDurationTicks(clip: Clip): number {
   return clip.sourceOutTicks - clip.sourceInTicks;
 }
 
+/** Instante (exclusivo) en el que termina el clip en la timeline de su pista. */
+export function clipEndTicks(clip: Clip): number {
+  return clip.startTicks + clipDurationTicks(clip);
+}
+
+/** Duración de una pista: el final del clip que termina más tarde (nunca la suma — puede haber huecos, ver Clip.startTicks). */
 export function trackDurationTicks(track: Track): number {
-  return track.clips.reduce((sum, clip) => sum + clipDurationTicks(clip), 0);
+  return track.clips.reduce((max, clip) => Math.max(max, clipEndTicks(clip)), 0);
 }
 
+/** Duración de la timeline completa: la pista más larga de todas. */
 export function timelineDurationTicks(timeline: Timeline): number {
-  return trackDurationTicks(timeline.track);
+  return timeline.tracks.reduce((max, track) => Math.max(max, trackDurationTicks(track)), 0);
 }
 
-/**
- * Posición de inicio de un clip en la timeline (suma de las
- * duraciones de los clips anteriores). Es la operación inversa de
- * walkTimeline a nivel de clip — walkTimeline resuelve "qué clip hay
- * en este tick"; clipStartTicks resuelve "en qué tick empieza este
- * clip". Útil para traducir de vuelta una posición de reproducción
- * dentro de un clip a una posición global de la timeline.
- */
-export function clipStartTicks(timeline: Timeline, clipIndex: number): number {
-  const clips = timeline.track.clips;
-  if (clipIndex < 0 || clipIndex >= clips.length) {
-    throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  }
-  let cursor = 0;
-  for (let i = 0; i < clipIndex; i++) {
-    cursor += clipDurationTicks(clips[i]!);
-  }
-  return cursor;
+function requireTrackIndex(timeline: Timeline, trackId: string): number {
+  const index = timeline.tracks.findIndex((t) => t.id === trackId);
+  if (index === -1) throw new RangeError(`Pista no encontrada: ${trackId}`);
+  return index;
+}
+
+function requireClipIndex(track: Track, clipId: string): number {
+  const index = track.clips.findIndex((c) => c.id === clipId);
+  if (index === -1) throw new RangeError(`Clip no encontrado: ${clipId}`);
+  return index;
+}
+
+function updateTrack(timeline: Timeline, trackId: string, update: (track: Track) => Track): Timeline {
+  const index = requireTrackIndex(timeline, trackId);
+  const tracks = [...timeline.tracks];
+  tracks[index] = update(tracks[index]!);
+  return { ...timeline, tracks };
+}
+
+function sortByStart(clips: Clip[]): Clip[] {
+  return [...clips].sort((a, b) => a.startTicks - b.startTicks);
+}
+
+function clipsOverlap(a: Clip, b: Clip): boolean {
+  return a.startTicks < clipEndTicks(b) && b.startTicks < clipEndTicks(a);
+}
+
+/** Clip que cubre `ticks` en `track` (o undefined si cae en un hueco o fuera de la pista). El rango de cada clip es semiabierto: [startTicks, clipEndTicks). */
+export function findClipAtTicks(track: Track, ticks: number): Clip | undefined {
+  if (ticks < 0) return undefined;
+  return track.clips.find((c) => ticks >= c.startTicks && ticks < clipEndTicks(c));
 }
 
 export interface TimelinePosition {
   clip: Clip;
+  /** Índice del clip dentro de `track.clips` (las pistas se mantienen ordenadas por startTicks tras cada mutación, ver updateTrack). */
   clipIndex: number;
+  trackId: string;
   sourceId: string;
   /** Instante correspondiente dentro del SourceFile referenciado por el clip. */
   sourceTimeTicks: number;
 }
 
 /**
- * Resuelve una posición de la línea de tiempo a (archivo, tiempo
- * dentro del archivo). Es el corazón de /core: tanto la
- * previsualización como la exportación llaman a esta misma función
- * para saber qué fotograma de qué archivo toca en el instante T — ver
- * DESIGN.md §2.
+ * Resuelve qué hay que dibujar en el instante `timelineTicks`: recorre
+ * las pistas de vídeo no ocultas de arriba a abajo (índice más alto
+ * primero, ver doc de Timeline.tracks) y devuelve la primera que tenga
+ * un clip en ese instante — composición por capas opacas, sin mezcla
+ * alfa. `null` si ninguna pista de vídeo tiene contenido ahí (negro).
  *
- * El rango válido de la timeline es semiabierto: [0, duración total).
- * Un `timelineTicks` negativo o >= a la duración total no corresponde
- * a ningún clip y devuelve null.
+ * Es el reemplazo de walkTimeline del modelo single-track: tanto la
+ * previsualización como la exportación llaman a esta misma función
+ * para el vídeo — ver DESIGN.md §2.
  */
-export function walkTimeline(
-  timeline: Timeline,
-  timelineTicks: number,
-): TimelinePosition | null {
+export function resolveActiveVideoPosition(timeline: Timeline, timelineTicks: number): TimelinePosition | null {
   if (timelineTicks < 0) return null;
-
-  let cursor = 0;
-  const clips = timeline.track.clips;
-  for (let i = 0; i < clips.length; i++) {
-    const clip = clips[i]!;
-    const duration = clipDurationTicks(clip);
-    if (timelineTicks < cursor + duration) {
-      return {
-        clip,
-        clipIndex: i,
-        sourceId: clip.sourceId,
-        sourceTimeTicks: clip.sourceInTicks + (timelineTicks - cursor),
-      };
-    }
-    cursor += duration;
+  for (let i = timeline.tracks.length - 1; i >= 0; i--) {
+    const track = timeline.tracks[i]!;
+    if (track.kind !== "video" || track.hidden) continue;
+    const clipIndex = track.clips.findIndex((c) => timelineTicks >= c.startTicks && timelineTicks < clipEndTicks(c));
+    if (clipIndex === -1) continue;
+    const clip = track.clips[clipIndex]!;
+    return {
+      clip,
+      clipIndex,
+      trackId: track.id,
+      sourceId: clip.sourceId,
+      sourceTimeTicks: clip.sourceInTicks + (timelineTicks - clip.startTicks),
+    };
   }
   return null;
 }
 
-export function appendClip(timeline: Timeline, clip: Clip): Timeline {
-  return {
-    ...timeline,
-    track: { ...timeline.track, clips: [...timeline.track.clips, clip] },
-  };
+/**
+ * Primer instante > `afterTicks` en el que alguna pista de vídeo no
+ * oculta vuelve a tener contenido (el `startTicks` de un clip más
+ * cercano tras ese punto). `null` si no hay ninguno — útil para saber
+ * cuánto dura, en la reproducción en directo, un hueco de vídeo antes
+ * de que algo vuelva a mostrarse (ver ui/main.ts, playGapFrom).
+ */
+export function nextVideoContentTicks(timeline: Timeline, afterTicks: number): number | null {
+  let best: number | null = null;
+  for (const track of timeline.tracks) {
+    if (track.kind !== "video" || track.hidden) continue;
+    for (const clip of track.clips) {
+      if (clip.startTicks > afterTicks && (best === null || clip.startTicks < best)) {
+        best = clip.startTicks;
+      }
+    }
+  }
+  return best;
 }
 
-/** Inserta `clip` en la posición `index` (recortado a [0, longitud]), desplazando el resto. */
-export function insertClipAt(timeline: Timeline, index: number, clip: Clip): Timeline {
-  const clips = [...timeline.track.clips];
-  const clampedIndex = Math.max(0, Math.min(index, clips.length));
-  clips.splice(clampedIndex, 0, clip);
-  return { ...timeline, track: { ...timeline.track, clips } };
+/** Añade una pista vacía y visible al final de `timeline.tracks` (capa más arriba de su tipo). */
+export function addTrack(timeline: Timeline, id: string, kind: TrackKind): Timeline {
+  return { ...timeline, tracks: [...timeline.tracks, { id, kind, clips: [], hidden: false }] };
 }
 
-/** Hueco (silencio + negro) de `durationTicks`. Ver DESIGN.md §1: es un Clip especial, no un campo de posición aparte. */
-export function createGap(id: string, durationTicks: number): Clip {
-  return {
-    id,
-    kind: "gap",
-    sourceId: "",
-    sourceInTicks: 0,
-    sourceOutTicks: Math.max(1, durationTicks),
-    volume: 1,
-    muted: false,
-  };
+export function removeTrack(timeline: Timeline, trackId: string): Timeline {
+  const index = requireTrackIndex(timeline, trackId);
+  const tracks = [...timeline.tracks];
+  tracks.splice(index, 1);
+  return { ...timeline, tracks };
 }
 
-/** Transición básica de `durationTicks` entre el clip anterior y el siguiente en el array (ver media/transitionRender.ts). */
-export function createTransition(id: string, durationTicks: number, transitionType: TransitionType): Clip {
+/** Excluye/incluye una pista entera de previsualización y exportación — ver doc de Track.hidden. */
+export function setTrackHidden(timeline: Timeline, trackId: string, hidden: boolean): Timeline {
+  return updateTrack(timeline, trackId, (track) => ({ ...track, hidden }));
+}
+
+/**
+ * Reordena las capas de composición: "up" acerca la pista a la capa de
+ * arriba (índice más alto = tapa a más pistas), "down" la aleja. Sin
+ * efecto si ya está en el extremo correspondiente.
+ */
+export function moveTrack(timeline: Timeline, trackId: string, direction: "up" | "down"): Timeline {
+  const index = requireTrackIndex(timeline, trackId);
+  const targetIndex = direction === "up" ? index + 1 : index - 1;
+  if (targetIndex < 0 || targetIndex >= timeline.tracks.length) return timeline;
+  const tracks = [...timeline.tracks];
+  const [moved] = tracks.splice(index, 1);
+  tracks.splice(targetIndex, 0, moved!);
+  return { ...timeline, tracks };
+}
+
+/** Añade `clip` al final de la pista `trackId` (después de su último clip — se ignora el `startTicks` de entrada, se recalcula aquí). */
+export function appendClip(timeline: Timeline, trackId: string, clip: Clip): Timeline {
+  return updateTrack(timeline, trackId, (track) => ({
+    ...track,
+    clips: [...track.clips, { ...clip, startTicks: trackDurationTicks(track) }],
+  }));
+}
+
+/** Añade `clip` a la pista `trackId` respetando su `clip.startTicks`. Lanza si se solaparía con otro clip ya existente en esa pista. */
+export function insertClip(timeline: Timeline, trackId: string, clip: Clip): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    if (track.clips.some((existing) => clipsOverlap(existing, clip))) {
+      throw new RangeError("El clip se solaparía con otro clip existente en la pista");
+    }
+    return { ...track, clips: sortByStart([...track.clips, clip]) };
+  });
+}
+
+/** Transición básica de `durationTicks` situada en `startTicks` (ver media/transitionRender.ts). Solo tiene efecto de fundido si encaja exactamente entre dos clips reales de la misma pista — ver neighborsOfTransition. */
+export function createTransition(
+  id: string,
+  startTicks: number,
+  durationTicks: number,
+  transitionType: TransitionType,
+): Clip {
   return {
     id,
     kind: "transition",
     sourceId: "",
+    startTicks,
     sourceInTicks: 0,
     sourceOutTicks: Math.max(1, durationTicks),
     volume: 1,
@@ -125,236 +190,179 @@ export function createTransition(id: string, durationTicks: number, transitionTy
   };
 }
 
-export function removeClip(timeline: Timeline, clipIndex: number): Timeline {
-  const clips = timeline.track.clips;
-  if (clipIndex < 0 || clipIndex >= clips.length) {
-    throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  }
-  const next = [...clips];
-  next.splice(clipIndex, 1);
-  return { ...timeline, track: { ...timeline.track, clips: next } };
+export function removeClip(timeline: Timeline, trackId: string, clipId: string): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clips = [...track.clips];
+    clips.splice(index, 1);
+    return { ...track, clips };
+  });
 }
 
 /**
- * Mueve un clip de fromIndex a toIndex dentro de la pista. Al ser un
- * modelo "ripple" (sin huecos), reordenar es solo mover el elemento en
- * el array — las posiciones de todos los clips afectados se derivan
- * solas la próxima vez que se calculen.
+ * Mueve el clip `clipId` de la pista `trackId` a `newStartTicks`. Ya no
+ * hay huecos-objeto que crecer/consumir ni reordenar el array (ver
+ * DESIGN.md/CLAUDE.md, ampliación de alcance del 2026-08-21): el nuevo
+ * inicio se recorta a `>= 0` y a no solapar a sus vecinos inmediatos en
+ * la MISMA pista (nunca solapamiento parcial, tampoco "pasar a través"
+ * de un vecino — el desplazamiento se topa con él).
  */
-export function reorderClip(
-  timeline: Timeline,
-  fromIndex: number,
-  toIndex: number,
-): Timeline {
-  const clips = timeline.track.clips;
-  if (fromIndex < 0 || fromIndex >= clips.length) {
-    throw new RangeError(`fromIndex fuera de rango: ${fromIndex}`);
-  }
-  if (toIndex < 0 || toIndex >= clips.length) {
-    throw new RangeError(`toIndex fuera de rango: ${toIndex}`);
-  }
-  const next = [...clips];
-  const [moved] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, moved!);
-  return { ...timeline, track: { ...timeline.track, clips: next } };
-}
+export function moveClipTo(timeline: Timeline, trackId: string, clipId: string, newStartTicks: number): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const duration = clipDurationTicks(clip);
+    const others = track.clips.filter((c) => c.id !== clipId);
 
-/**
- * Arrastrar-para-reposicionar en la línea de tiempo: desplaza el clip
- * `clipId` `deltaTicks` respecto a su posición actual (positivo = más
- * tarde, negativo = más temprano). No hay campo de posición que tocar
- * (ver DESIGN.md §1) — mover un clip es siempre una operación sobre el
- * hueco INMEDIATAMENTE ANTERIOR a él (nunca sobre lo que viene
- * después: para abrir/cerrar hueco con el vecino de la derecha se
- * arrastra ESE vecino, no este clip — así el desplazamiento nunca
- * necesita tocar más de un límite a la vez):
- *
- * - Desplazamiento positivo (más tarde): crece el hueco anterior (o
- *   crea uno nuevo si no había, incluso si el clip es el primero de la
- *   pista). Siempre tiene éxito — el resto de la pista, al ser sumas
- *   acumuladas, se desplaza solo más tarde. Mismo efecto que
- *   "Insertar hueco", solo que disparado arrastrando en vez de con un
- *   botón.
- * - Desplazamiento negativo (más temprano): encoge el hueco anterior.
- *   Si se consume entero, se elimina y el resto del desplazamiento
- *   sigue absorbiéndose contra lo que haya ANTES de eso (que puede ser
- *   otro hueco, o un clip real). Contra un clip real hace falta
- *   arrastrar como mínimo su duración completa para "pasar" a través
- *   de él — entonces se intercambian de posición (reordenar); un
- *   desplazamiento menor se recorta a 0 (no se permite solapar
- *   parcialmente un clip real). Si no queda nada antes (es el primer
- *   clip de la pista), se recorta a 0: no se puede ir antes del
- *   principio de la timeline.
- *
- * `newGapId` lo aporta el llamador para que la función siga siendo
- * pura y determinista (mismo patrón que splitClipAt con newIds) —
- * solo se usa cuando el desplazamiento positivo crea un hueco nuevo.
- */
-export function moveClipByDelta(
-  timeline: Timeline,
-  clipId: string,
-  deltaTicks: number,
-  newGapId: string,
-): Timeline {
-  const clips = [...timeline.track.clips];
-  const index = clips.findIndex((c) => c.id === clipId);
-  if (index === -1) return timeline;
-
-  if (deltaTicks > 0) {
-    const prevIndex = index - 1;
-    if (prevIndex >= 0 && clips[prevIndex]!.kind === "gap") {
-      clips[prevIndex] = { ...clips[prevIndex]!, sourceOutTicks: clips[prevIndex]!.sourceOutTicks + deltaTicks };
-    } else {
-      clips.splice(index, 0, createGap(newGapId, deltaTicks));
-    }
-    return { ...timeline, track: { ...timeline.track, clips } };
-  }
-
-  let remaining = -deltaTicks;
-  let cursor = index;
-  while (remaining > 0) {
-    const prevIndex = cursor - 1;
-    if (prevIndex < 0) {
-      remaining = 0;
-      break;
-    }
-    if (clips[prevIndex]!.kind === "gap") {
-      const gapDuration = clipDurationTicks(clips[prevIndex]!);
-      if (remaining < gapDuration) {
-        clips[prevIndex] = { ...clips[prevIndex]!, sourceOutTicks: clips[prevIndex]!.sourceOutTicks - remaining };
-        remaining = 0;
-      } else {
-        remaining -= gapDuration;
-        clips.splice(prevIndex, 1);
-        cursor -= 1;
+    let leftNeighbor: Clip | undefined;
+    let rightNeighbor: Clip | undefined;
+    for (const other of others) {
+      if (clipEndTicks(other) <= clip.startTicks) {
+        if (!leftNeighbor || clipEndTicks(other) > clipEndTicks(leftNeighbor)) leftNeighbor = other;
       }
-    } else {
-      const neighborDuration = clipDurationTicks(clips[prevIndex]!);
-      if (remaining >= neighborDuration) {
-        const neighbor = clips[prevIndex]!;
-        clips[prevIndex] = clips[cursor]!;
-        clips[cursor] = neighbor;
-        cursor = prevIndex;
-        remaining -= neighborDuration;
-      } else {
-        remaining = 0;
+      if (other.startTicks >= clipEndTicks(clip)) {
+        if (!rightNeighbor || other.startTicks < rightNeighbor.startTicks) rightNeighbor = other;
       }
     }
-  }
 
-  return { ...timeline, track: { ...timeline.track, clips } };
+    const minStart = leftNeighbor ? clipEndTicks(leftNeighbor) : 0;
+    const maxStart = rightNeighbor ? rightNeighbor.startTicks - duration : Infinity;
+    const clampedStart = Math.max(0, Math.max(minStart, Math.min(newStartTicks, maxStart)));
+
+    const clips = [...track.clips];
+    clips[index] = { ...clip, startTicks: clampedStart };
+    return { ...track, clips: sortByStart(clips) };
+  });
 }
 
 /**
- * Parte el clip que ocupa timelineTicks en dos. newIds debe traer los
- * ids de los dos clips resultantes: [idDelPrimerTrozo, idDelSegundoTrozo].
- * Se piden explícitos (en vez de generarlos aquí con, p.ej., un uuid
- * aleatorio) para que la función siga siendo pura y determinista.
+ * Parte el clip que ocupa `timelineTicks` en la pista `trackId` en dos.
+ * newIds debe traer los ids de los dos clips resultantes:
+ * [idDelPrimerTrozo, idDelSegundoTrozo] — se piden explícitos para que
+ * la función siga siendo pura y determinista.
  *
- * Lanza si timelineTicks cae fuera de la timeline, o si coincide
- * exactamente con el inicio de un clip (el corte produciría un
- * fragmento de duración cero).
+ * Lanza si timelineTicks cae en un hueco o fuera de la pista, o si
+ * coincide exactamente con el inicio de un clip (el corte produciría
+ * un fragmento de duración cero).
  */
 export function splitClipAt(
   timeline: Timeline,
+  trackId: string,
   timelineTicks: number,
   newIds: [string, string],
 ): Timeline {
-  const position = walkTimeline(timeline, timelineTicks);
-  if (!position) {
-    throw new RangeError(
-      `No hay ningún clip en el tick ${timelineTicks} de la timeline`,
-    );
-  }
-  const { clip, clipIndex, sourceTimeTicks } = position;
-  if (sourceTimeTicks === clip.sourceInTicks) {
-    throw new RangeError(
-      "El punto de corte coincide con el inicio del clip; el corte produciría un fragmento de duración cero",
-    );
-  }
+  return updateTrack(timeline, trackId, (track) => {
+    const index = track.clips.findIndex((c) => timelineTicks >= c.startTicks && timelineTicks < clipEndTicks(c));
+    if (index === -1) {
+      throw new RangeError(`No hay ningún clip en el tick ${timelineTicks} de la pista ${trackId}`);
+    }
+    const clip = track.clips[index]!;
+    if (timelineTicks === clip.startTicks) {
+      throw new RangeError(
+        "El punto de corte coincide con el inicio del clip; el corte produciría un fragmento de duración cero",
+      );
+    }
 
-  const [firstId, secondId] = newIds;
-  const firstHalf: Clip = { ...clip, id: firstId, sourceOutTicks: sourceTimeTicks };
-  const secondHalf: Clip = { ...clip, id: secondId, sourceInTicks: sourceTimeTicks };
+    const [firstId, secondId] = newIds;
+    const sourceSplitTicks = clip.sourceInTicks + (timelineTicks - clip.startTicks);
+    const firstHalf: Clip = { ...clip, id: firstId, sourceOutTicks: sourceSplitTicks };
+    const secondHalf: Clip = {
+      ...clip,
+      id: secondId,
+      sourceInTicks: sourceSplitTicks,
+      startTicks: timelineTicks,
+    };
 
-  const clips = [...timeline.track.clips];
-  clips.splice(clipIndex, 1, firstHalf, secondHalf);
-  return { ...timeline, track: { ...timeline.track, clips } };
+    const clips = [...track.clips];
+    clips.splice(index, 1, firstHalf, secondHalf);
+    return { ...track, clips };
+  });
 }
 
 /**
  * Ajusta el punto de entrada de un clip. minDurationTicks lo calcula
  * el llamador (normalmente frameDurationTicks() del frame rate de la
  * fuente) — /core no conoce el registro de SourceFile, solo aplica la
- * invariante de que ningún clip puede quedar por debajo de esa duración.
+ * invariante de que ningún clip puede quedar por debajo de esa
+ * duración. No toca `startTicks`: el clip sigue empezando en el mismo
+ * punto de la timeline, solo cambia cuánto dura (y por tanto dónde
+ * termina) — el hueco que eso deja o cierra es automático.
  */
 export function trimClipIn(
   timeline: Timeline,
-  clipIndex: number,
+  trackId: string,
+  clipId: string,
   newSourceInTicks: number,
   minDurationTicks: number,
 ): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  if (newSourceInTicks < 0) {
-    throw new RangeError("sourceInTicks no puede ser negativo");
-  }
-  if (clip.sourceOutTicks - newSourceInTicks < minDurationTicks) {
-    throw new RangeError(
-      "El recorte dejaría el clip por debajo de la duración mínima",
-    );
-  }
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = { ...clip, sourceInTicks: newSourceInTicks };
-  return { ...timeline, track: { ...timeline.track, clips } };
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    if (newSourceInTicks < 0) {
+      throw new RangeError("sourceInTicks no puede ser negativo");
+    }
+    if (clip.sourceOutTicks - newSourceInTicks < minDurationTicks) {
+      throw new RangeError("El recorte dejaría el clip por debajo de la duración mínima");
+    }
+    const clips = [...track.clips];
+    clips[index] = { ...clip, sourceInTicks: newSourceInTicks };
+    return { ...track, clips };
+  });
 }
 
-/** Ajusta el punto de salida de un clip. Ver trimClipIn para minDurationTicks. */
+/** Ajusta el punto de salida de un clip. Ver trimClipIn para minDurationTicks y por qué no toca `startTicks`. */
 export function trimClipOut(
   timeline: Timeline,
-  clipIndex: number,
+  trackId: string,
+  clipId: string,
   newSourceOutTicks: number,
   minDurationTicks: number,
 ): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  if (newSourceOutTicks - clip.sourceInTicks < minDurationTicks) {
-    throw new RangeError(
-      "El recorte dejaría el clip por debajo de la duración mínima",
-    );
-  }
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = { ...clip, sourceOutTicks: newSourceOutTicks };
-  return { ...timeline, track: { ...timeline.track, clips } };
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    if (newSourceOutTicks - clip.sourceInTicks < minDurationTicks) {
+      throw new RangeError("El recorte dejaría el clip por debajo de la duración mínima");
+    }
+    const clips = [...track.clips];
+    clips[index] = { ...clip, sourceOutTicks: newSourceOutTicks };
+    return { ...track, clips };
+  });
 }
 
 /** Ganancia de audio (0-1, se recorta a ese rango) y silencio de un clip. */
 export function setClipAudio(
   timeline: Timeline,
-  clipIndex: number,
+  trackId: string,
+  clipId: string,
   volume: number,
   muted: boolean,
 ): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  const clampedVolume = Math.max(0, Math.min(1, volume));
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = { ...clip, volume: clampedVolume, muted };
-  return { ...timeline, track: { ...timeline.track, clips } };
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const clampedVolume = Math.max(0, Math.min(1, volume));
+    const clips = [...track.clips];
+    clips[index] = { ...clip, volume: clampedVolume, muted };
+    return { ...track, clips };
+  });
 }
 
 /** Cambia (o quita, con undefined) el filtro de color de un clip. Ver ColorFilterType. */
 export function setClipColorFilter(
   timeline: Timeline,
-  clipIndex: number,
+  trackId: string,
+  clipId: string,
   colorFilter: ColorFilterType | undefined,
 ): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  const { colorFilter: _previous, ...rest } = clip;
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = colorFilter ? { ...rest, colorFilter } : rest;
-  return { ...timeline, track: { ...timeline.track, clips } };
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const { colorFilter: _previous, ...rest } = clip;
+    const clips = [...track.clips];
+    clips[index] = colorFilter ? { ...rest, colorFilter } : rest;
+    return { ...track, clips };
+  });
 }
 
 /** Ganancia efectiva de un clip para reproducción/exportación: 0 si está silenciado. */
@@ -425,33 +433,43 @@ export function volumeAutomationFrom(clip: Clip, startOffsetTicks: number): Volu
 /** Añade un punto de volumen a un clip, manteniendo el array ordenado por offsetTicks. offsetTicks se recorta a [0, duración del clip] y volume a [0,1]. */
 export function addVolumeKeyframe(
   timeline: Timeline,
-  clipIndex: number,
+  trackId: string,
+  clipId: string,
   offsetTicks: number,
   volume: number,
 ): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  const clampedOffset = Math.max(0, Math.min(offsetTicks, clipDurationTicks(clip)));
-  const clampedVolume = Math.max(0, Math.min(1, volume));
-  const keyframe: VolumeKeyframe = { offsetTicks: clampedOffset, volume: clampedVolume };
-  const next = [...(clip.volumeKeyframes ?? []), keyframe].sort((a, b) => a.offsetTicks - b.offsetTicks);
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = { ...clip, volumeKeyframes: next };
-  return { ...timeline, track: { ...timeline.track, clips } };
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const clampedOffset = Math.max(0, Math.min(offsetTicks, clipDurationTicks(clip)));
+    const clampedVolume = Math.max(0, Math.min(1, volume));
+    const keyframe: VolumeKeyframe = { offsetTicks: clampedOffset, volume: clampedVolume };
+    const next = [...(clip.volumeKeyframes ?? []), keyframe].sort((a, b) => a.offsetTicks - b.offsetTicks);
+    const clips = [...track.clips];
+    clips[index] = { ...clip, volumeKeyframes: next };
+    return { ...track, clips };
+  });
 }
 
 /** Quita el punto de volumen en `keyframeIndex`. Sin efecto si el índice no existe. */
-export function removeVolumeKeyframe(timeline: Timeline, clipIndex: number, keyframeIndex: number): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  const existing = clip.volumeKeyframes ?? [];
-  if (keyframeIndex < 0 || keyframeIndex >= existing.length) return timeline;
-  const next = existing.filter((_, i) => i !== keyframeIndex);
-  const { volumeKeyframes: _removed, ...clipWithoutKeyframes } = clip;
-  const updatedClip: Clip = next.length > 0 ? { ...clipWithoutKeyframes, volumeKeyframes: next } : clipWithoutKeyframes;
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = updatedClip;
-  return { ...timeline, track: { ...timeline.track, clips } };
+export function removeVolumeKeyframe(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  keyframeIndex: number,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const existing = clip.volumeKeyframes ?? [];
+    if (keyframeIndex < 0 || keyframeIndex >= existing.length) return track;
+    const next = existing.filter((_, i) => i !== keyframeIndex);
+    const { volumeKeyframes: _removed, ...clipWithoutKeyframes } = clip;
+    const updatedClip: Clip = next.length > 0 ? { ...clipWithoutKeyframes, volumeKeyframes: next } : clipWithoutKeyframes;
+    const clips = [...track.clips];
+    clips[index] = updatedClip;
+    return { ...track, clips };
+  });
 }
 
 /**
@@ -462,58 +480,69 @@ export function removeVolumeKeyframe(timeline: Timeline, clipIndex: number, keyf
  */
 export function moveVolumeKeyframe(
   timeline: Timeline,
-  clipIndex: number,
+  trackId: string,
+  clipId: string,
   keyframeIndex: number,
   newOffsetTicks: number,
   newVolume: number,
 ): Timeline {
-  const clip = timeline.track.clips[clipIndex];
-  if (!clip) throw new RangeError(`Índice de clip fuera de rango: ${clipIndex}`);
-  const existing = clip.volumeKeyframes ?? [];
-  if (keyframeIndex < 0 || keyframeIndex >= existing.length) return timeline;
-  const prevBound = keyframeIndex > 0 ? existing[keyframeIndex - 1]!.offsetTicks : 0;
-  const nextBound =
-    keyframeIndex < existing.length - 1 ? existing[keyframeIndex + 1]!.offsetTicks : clipDurationTicks(clip);
-  const clampedOffset = Math.max(prevBound, Math.min(newOffsetTicks, nextBound));
-  const clampedVolume = Math.max(0, Math.min(1, newVolume));
-  const next = [...existing];
-  next[keyframeIndex] = { offsetTicks: clampedOffset, volume: clampedVolume };
-  const clips = [...timeline.track.clips];
-  clips[clipIndex] = { ...clip, volumeKeyframes: next };
-  return { ...timeline, track: { ...timeline.track, clips } };
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const existing = clip.volumeKeyframes ?? [];
+    if (keyframeIndex < 0 || keyframeIndex >= existing.length) return track;
+    const prevBound = keyframeIndex > 0 ? existing[keyframeIndex - 1]!.offsetTicks : 0;
+    const nextBound =
+      keyframeIndex < existing.length - 1 ? existing[keyframeIndex + 1]!.offsetTicks : clipDurationTicks(clip);
+    const clampedOffset = Math.max(prevBound, Math.min(newOffsetTicks, nextBound));
+    const clampedVolume = Math.max(0, Math.min(1, newVolume));
+    const next = [...existing];
+    next[keyframeIndex] = { offsetTicks: clampedOffset, volume: clampedVolume };
+    const clips = [...track.clips];
+    clips[index] = { ...clip, volumeKeyframes: next };
+    return { ...track, clips };
+  });
 }
 
-// --- Audio durante una transición ---
+// --- Transiciones: vecindad y audio ---
 // Una transición no reproduce vídeo propio (congela fotogramas, ver
 // DESIGN.md §"Huecos y transiciones"), pero SÍ debería fundir el audio
 // del clip saliente con el del entrante en vez de dejar silencio — ver
-// CLAUDE.md. La franja de audio que le corresponde a la transición se
-// RESTA de la reproducción normal del clip vecino (nunca se duplica ni
-// se deja en silencio): el vecino suena `fadeDurationTicks` menos por
-// ese lado, y esa misma franja se reproduce, con fundido, durante la
-// transición.
+// CLAUDE.md. Solo tiene vecinos si encaja EXACTAMENTE entre dos clips
+// reales de su misma pista (su inicio coincide con el final de uno, su
+// final con el inicio del otro) — ya no hay adyacencia de array que
+// asumir, se resuelve por posición.
 
-/** Ticks que hay que recortar del FINAL del audio normal de `clipIndex` porque el siguiente elemento es una transición que ya se encarga de esa franja (fundido de salida). 0 si no aplica. */
-export function audioTailCutTicks(timeline: Timeline, clipIndex: number): number {
-  const clip = timeline.track.clips[clipIndex];
-  const next = timeline.track.clips[clipIndex + 1];
-  if (!clip || !next || next.kind !== "transition") return 0;
+/** Vecinos reales (kind === "clip") de una transición en su propia pista, por coincidencia exacta de posición. Cualquiera de los dos puede faltar (transición al principio/final de la pista, o separada de su vecino por un hueco). */
+export function neighborsOfTransition(track: Track, transitionClip: Clip): { prev: Clip | undefined; next: Clip | undefined } {
+  const prev = track.clips.find(
+    (c) => c.kind === "clip" && c.id !== transitionClip.id && clipEndTicks(c) === transitionClip.startTicks,
+  );
+  const next = track.clips.find(
+    (c) => c.kind === "clip" && c.id !== transitionClip.id && c.startTicks === clipEndTicks(transitionClip),
+  );
+  return { prev, next };
+}
+
+/** Ticks que hay que recortar del FINAL del audio normal de `clip` porque justo después, en la misma pista, hay una transición que ya se encarga de esa franja (fundido de salida). 0 si no aplica. */
+export function audioTailCutTicks(track: Track, clip: Clip): number {
+  const next = track.clips.find((c) => c.kind === "transition" && c.startTicks === clipEndTicks(clip));
+  if (!next) return 0;
   return Math.min(clipDurationTicks(next), clipDurationTicks(clip));
 }
 
-/** Ticks que hay que recortar del PRINCIPIO del audio normal de `clipIndex` porque el elemento anterior es una transición que ya se encarga de esa franja (fundido de entrada). 0 si no aplica. */
-export function audioHeadCutTicks(timeline: Timeline, clipIndex: number): number {
-  const clip = timeline.track.clips[clipIndex];
-  const prev = timeline.track.clips[clipIndex - 1];
-  if (!clip || !prev || prev.kind !== "transition") return 0;
+/** Ticks que hay que recortar del PRINCIPIO del audio normal de `clip` porque justo antes, en la misma pista, hay una transición que ya se encarga de esa franja (fundido de entrada). 0 si no aplica. */
+export function audioHeadCutTicks(track: Track, clip: Clip): number {
+  const prev = track.clips.find((c) => c.kind === "transition" && clipEndTicks(c) === clip.startTicks);
+  if (!prev) return 0;
   return Math.min(clipDurationTicks(prev), clipDurationTicks(clip));
 }
 
 /** Un tramo de audio de un clip vecino que hay que reproducir/exportar durante una transición, ya con su rampa de fundido lista. */
 export interface TransitionAudioCue {
-  /** Índice del clip (saliente o entrante) cuyo audio hay que sonar. */
-  clipIndex: number;
-  /** Punto de entrada dentro de la FUENTE de ese clip. */
+  /** sourceId del clip vecino (saliente o entrante) cuyo audio hay que sonar. */
+  sourceId: string;
+  /** Punto de entrada dentro de la FUENTE de ese clip vecino. */
   sourceStartTicks: number;
   /** Cuánto de esa fuente suena. */
   durationTicks: number;
@@ -522,37 +551,33 @@ export interface TransitionAudioCue {
 }
 
 /**
- * Qué audio hay que reproducir durante una transición, empezando en
- * `startOffsetTicks` dentro de ELLA (0 = su inicio; útil si se hace
- * seek/se retoma a mitad). El fundido de cada lado dura
+ * Qué audio hay que reproducir durante una transición de `track`,
+ * empezando en `startOffsetTicks` dentro de ELLA (0 = su inicio; útil
+ * si se hace seek/se retoma a mitad). El fundido de cada lado dura
  * `min(duración de la transición, duración del propio vecino)` — si
  * el vecino es más corto que la transición, su fundido se completa
  * antes de que la transición termine visualmente. Ninguno de los dos
- * cues se genera si ese lado no tiene un clip real con audio (p.ej.
- * transición al principio/final de la timeline, o vecino silenciado).
+ * cues se genera si ese lado no tiene un vecino real (ver
+ * neighborsOfTransition) o si está silenciado.
  */
 export function transitionAudioCues(
-  timeline: Timeline,
-  transitionIndex: number,
+  track: Track,
+  transitionClip: Clip,
   startOffsetTicks: number,
 ): TransitionAudioCue[] {
-  const clips = timeline.track.clips;
-  const transitionClip = clips[transitionIndex];
-  if (!transitionClip) return [];
   const totalDuration = clipDurationTicks(transitionClip);
   if (startOffsetTicks >= totalDuration) return [];
 
   const cues: TransitionAudioCue[] = [];
-  const from = clips[transitionIndex - 1];
-  const to = clips[transitionIndex + 1];
+  const { prev: from, next: to } = neighborsOfTransition(track, transitionClip);
 
-  if (from && from.kind === "clip" && !from.muted) {
+  if (from && !from.muted) {
     const fadeDuration = Math.min(totalDuration, clipDurationTicks(from));
     if (startOffsetTicks < fadeDuration) {
       const remainingTicks = fadeDuration - startOffsetTicks;
       const baseGain = effectiveClipVolume(from);
       cues.push({
-        clipIndex: transitionIndex - 1,
+        sourceId: from.sourceId,
         sourceStartTicks: from.sourceOutTicks - fadeDuration + startOffsetTicks,
         durationTicks: remainingTicks,
         automation: [
@@ -563,13 +588,13 @@ export function transitionAudioCues(
     }
   }
 
-  if (to && to.kind === "clip" && !to.muted) {
+  if (to && !to.muted) {
     const fadeDuration = Math.min(totalDuration, clipDurationTicks(to));
     if (startOffsetTicks < fadeDuration) {
       const remainingTicks = fadeDuration - startOffsetTicks;
       const baseGain = effectiveClipVolume(to);
       cues.push({
-        clipIndex: transitionIndex + 1,
+        sourceId: to.sourceId,
         sourceStartTicks: to.sourceInTicks + startOffsetTicks,
         durationTicks: remainingTicks,
         automation: [

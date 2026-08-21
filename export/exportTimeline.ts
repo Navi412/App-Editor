@@ -3,13 +3,12 @@ import {
   audioHeadCutTicks,
   audioTailCutTicks,
   clipDurationTicks,
-  clipStartTicks,
+  resolveActiveVideoPosition,
   timelineDurationTicks,
   transitionAudioCues,
   volumeAutomationFrom,
-  walkTimeline,
 } from "../core/timeline";
-import type { Timeline } from "../core/types";
+import type { Clip, Timeline, Track } from "../core/types";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import { playAudioSlice } from "../media/audioPlayer";
 import { drawFrameFit } from "../media/render";
@@ -150,11 +149,11 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
   // una sola vez (no uno por cada fotograma de salida dentro de su
   // ventana) y se reutilizan mientras dure el export.
   const transitionFramesCache = new Map<string, TransitionBoundaryFrames>();
-  async function transitionFramesFor(clipIndex: number, transitionId: string): Promise<TransitionBoundaryFrames> {
-    let frames = transitionFramesCache.get(transitionId);
+  async function transitionFramesFor(track: Track, transitionClip: Clip): Promise<TransitionBoundaryFrames> {
+    let frames = transitionFramesCache.get(transitionClip.id);
     if (!frames) {
-      frames = await captureTransitionBoundaryFrames(timeline, clipIndex, getSource, width, height);
-      transitionFramesCache.set(transitionId, frames);
+      frames = await captureTransitionBoundaryFrames(track, transitionClip, getSource, width, height);
+      transitionFramesCache.set(transitionClip.id, frames);
     }
     return frames;
   }
@@ -163,16 +162,15 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       throwIfAborted(signal);
       const timelineTicks = frameIndex * stepTicks;
-      const position = walkTimeline(timeline, timelineTicks);
-      if (!position) break;
+      const position = resolveActiveVideoPosition(timeline, timelineTicks);
 
-      if (position.clip.kind === "gap") {
+      if (!position) {
         ctx.clearRect(0, 0, width, height);
       } else if (position.clip.kind === "transition") {
-        const frames = await transitionFramesFor(position.clipIndex, position.clip.id);
-        const clipStart = clipStartTicks(timeline, position.clipIndex);
+        const track = timeline.tracks.find((t) => t.id === position.trackId)!;
+        const frames = await transitionFramesFor(track, position.clip);
         const duration = clipDurationTicks(position.clip);
-        const progress = duration > 0 ? (timelineTicks - clipStart) / duration : 0;
+        const progress = duration > 0 ? (timelineTicks - position.clip.startTicks) / duration : 0;
         drawTransitionFrame(ctx, width, height, position.clip.transitionType ?? "crossfade", frames, progress);
       } else {
         const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
@@ -226,66 +224,68 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
 
 /**
  * Renderiza el audio de toda la timeline en una sola pasada de
- * OfflineAudioContext: cada clip se programa a su posición acumulada
- * (mismo criterio de "ripple" que /core) — el propio OfflineAudioContext
- * remuestrea si la fuente no está ya al sample rate del proyecto. Los
- * clips cuya fuente no tiene audio simplemente no conectan nada ahí:
- * queda en silencio, sin desincronizar el resto.
+ * OfflineAudioContext: cada clip de cada pista no oculta se programa
+ * directamente en su `startTicks` — el propio OfflineAudioContext
+ * remuestrea si la fuente no está ya al sample rate del proyecto. Se
+ * recorren TODAS las pistas (el audio pegado a los clips de las
+ * pistas de vídeo Y los clips propios de las pistas de audio, ver
+ * CLAUDE.md — ampliación de alcance multipista del 2026-08-21): a
+ * diferencia del vídeo, el audio no tiene concepto de "capas que se
+ * tapan", todo lo no oculto suena mezclado. Los clips cuya fuente no
+ * tiene audio simplemente no conectan nada ahí: quedan en silencio,
+ * sin desincronizar el resto.
  *
  * Una transición no tiene audio propio, pero tampoco deja un hueco de
  * silencio: la franja de audio que le corresponde se resta de la
- * reproducción normal del clip saliente/entrante (audioHeadCutTicks/
- * audioTailCutTicks) y se reproduce ahí, con fundido cruzado
- * (transitionAudioCues) — mismas funciones puras de /core que usa la
- * reproducción en directo en ui/main.ts, así preview y export nunca
- * pueden divergir en esto.
+ * reproducción normal del clip saliente/entrante de SU MISMA pista
+ * (audioHeadCutTicks/audioTailCutTicks) y se reproduce ahí, con
+ * fundido cruzado (transitionAudioCues) — mismas funciones puras de
+ * /core que usa la reproducción en directo en ui/main.ts, así preview
+ * y export nunca pueden divergir en esto.
  */
 async function renderExportAudio(timeline: Timeline, getAudio: (sourceId: string) => AudioBuffer | undefined): Promise<AudioBuffer> {
   const totalSeconds = Math.max(ticksToSeconds(timelineDurationTicks(timeline)), 1 / AUDIO_SAMPLE_RATE);
   const totalFrames = Math.max(1, Math.ceil(totalSeconds * AUDIO_SAMPLE_RATE));
   const offline = new OfflineAudioContext(AUDIO_CHANNELS, totalFrames, AUDIO_SAMPLE_RATE);
 
-  const clips = timeline.track.clips;
-  let cursorSeconds = 0;
-  clips.forEach((clip, index) => {
-    const durationSeconds = ticksToSeconds(clipDurationTicks(clip));
-
-    if (clip.kind === "clip") {
-      const sourceBuffer = getAudio(clip.sourceId);
-      if (sourceBuffer && !clip.muted) {
-        const headCutTicks = audioHeadCutTicks(timeline, index);
-        const playDurationTicks = clipDurationTicks(clip) - headCutTicks - audioTailCutTicks(timeline, index);
-        if (playDurationTicks > 0) {
+  for (const track of timeline.tracks) {
+    if (track.hidden) continue;
+    for (const clip of track.clips) {
+      if (clip.kind === "clip") {
+        const sourceBuffer = getAudio(clip.sourceId);
+        if (sourceBuffer && !clip.muted) {
+          const headCutTicks = audioHeadCutTicks(track, clip);
+          const playDurationTicks = clipDurationTicks(clip) - headCutTicks - audioTailCutTicks(track, clip);
+          if (playDurationTicks > 0) {
+            playAudioSlice(
+              offline,
+              sourceBuffer,
+              ticksToSeconds(clip.sourceInTicks + headCutTicks),
+              ticksToSeconds(playDurationTicks),
+              ticksToSeconds(clip.startTicks + headCutTicks),
+              volumeAutomationFrom(clip, headCutTicks),
+            );
+          }
+        }
+      } else if (clip.kind === "transition") {
+        // El export siempre entra en la transición desde su propio
+        // inicio (startOffsetTicks=0), nunca a mitad — a diferencia de
+        // la reproducción en vivo, que puede retomarla tras un seek.
+        for (const cue of transitionAudioCues(track, clip, 0)) {
+          const neighborBuffer = getAudio(cue.sourceId);
+          if (!neighborBuffer) continue;
           playAudioSlice(
             offline,
-            sourceBuffer,
-            ticksToSeconds(clip.sourceInTicks + headCutTicks),
-            ticksToSeconds(playDurationTicks),
-            cursorSeconds + ticksToSeconds(headCutTicks),
-            volumeAutomationFrom(clip, headCutTicks),
+            neighborBuffer,
+            ticksToSeconds(cue.sourceStartTicks),
+            ticksToSeconds(cue.durationTicks),
+            ticksToSeconds(clip.startTicks),
+            cue.automation,
           );
         }
       }
-    } else if (clip.kind === "transition") {
-      // El export siempre entra en la transición desde su propio
-      // inicio (startOffsetTicks=0), nunca a mitad — a diferencia de
-      // la reproducción en vivo, que puede retomarla tras un seek.
-      for (const cue of transitionAudioCues(timeline, index, 0)) {
-        const neighborBuffer = getAudio(clips[cue.clipIndex]?.sourceId ?? "");
-        if (!neighborBuffer) continue;
-        playAudioSlice(
-          offline,
-          neighborBuffer,
-          ticksToSeconds(cue.sourceStartTicks),
-          ticksToSeconds(cue.durationTicks),
-          cursorSeconds,
-          cue.automation,
-        );
-      }
     }
-
-    cursorSeconds += durationSeconds;
-  });
+  }
 
   return offline.startRendering();
 }
@@ -296,7 +296,9 @@ async function exportAudioTrack(
   muxer: Mp4Muxer,
   signal: AbortSignal | undefined,
 ): Promise<void> {
-  const hasAnyAudio = timeline.track.clips.some((clip) => getAudio(clip.sourceId) !== undefined);
+  const hasAnyAudio = timeline.tracks.some(
+    (track) => !track.hidden && track.clips.some((clip) => getAudio(clip.sourceId) !== undefined),
+  );
   if (!hasAnyAudio) return;
 
   const buffer = await renderExportAudio(timeline, getAudio);

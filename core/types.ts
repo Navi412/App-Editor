@@ -4,19 +4,28 @@ import type { FrameRate } from "./time";
  * Metadatos de un archivo de origen. No contiene el archivo en sí ni
  * nada de I/O — eso vive en /media. /core solo necesita saber lo
  * mínimo para hacer aritmética de tiempo sobre él.
+ *
+ * `kind: "audio"` (fuente de solo audio, p.ej. un mp3/wav importado
+ * directamente para una pista de audio — ampliación de alcance pedida
+ * explícitamente el 2026-08-21, ver CLAUDE.md) no tiene `frameRate`/
+ * `width`/`height`: no hay vídeo que decodificar.
  */
 export interface SourceFile {
   id: string;
-  frameRate: FrameRate;
-  width: number;
-  height: number;
+  kind: "video" | "audio";
+  frameRate?: FrameRate;
+  width?: number;
+  height?: number;
   durationTicks: number;
 }
 
-/** "clip" = vídeo real; "gap" = hueco (silencio/negro); "transition" = fundido entre el clip anterior y el siguiente. Ver DESIGN.md §1. */
-export type ClipKind = "clip" | "gap" | "transition";
+/** "clip" = vídeo o audio real; "transition" = fundido entre el clip anterior y el siguiente de la MISMA pista. Ver DESIGN.md §1. Ya no existe "gap": un hueco es simplemente el tramo sin clip entre dos posiciones (ver `Clip.startTicks`) — ampliación de alcance pedida explícitamente el 2026-08-21, ver CLAUDE.md. */
+export type ClipKind = "clip" | "transition";
 
 export type TransitionType = "crossfade" | "dipToBlack";
+
+/** Ver Track.kind. */
+export type TrackKind = "video" | "audio";
 
 /**
  * Filtro de color aplicado a un clip entero (todo su rango recortado),
@@ -42,23 +51,32 @@ export interface VolumeKeyframe {
 
 /**
  * Un Clip es una referencia a un SourceFile más un rango de tiempo
- * dentro de ese archivo — nunca datos de píxeles copiados. La posición
- * del clip en la línea de tiempo NO se almacena aquí: se deriva de su
- * posición en Track.clips (modelo "ripple", ver DESIGN.md §1).
+ * dentro de ese archivo — nunca datos de píxeles copiados.
  *
- * Un hueco o una transición son un Clip especial más en el array (no
- * un tipo de dato aparte ni un campo de posición): `sourceId` va vacío
- * y `sourceOutTicks - sourceInTicks` es su duración. Mantiene la misma
- * invariante "sin campo de posición" para todo — ver DESIGN.md §1.
+ * `startTicks` es la posición absoluta de inicio del clip en la
+ * timeline de SU pista — ampliación de alcance pedida explícitamente
+ * el 2026-08-21 (ver CLAUDE.md), sustituye el modelo "ripple" anterior
+ * (donde la posición se derivaba sumando las duraciones de los clips
+ * previos en el array). Dos clips de la misma pista nunca se solapan,
+ * pero pueden dejar un tramo sin cubrir entre ellos — ese tramo ES el
+ * hueco, no hay ningún objeto que lo represente.
+ *
+ * Una transición es un Clip especial más en el array (no un tipo de
+ * dato aparte): `sourceId` va vacío y `sourceOutTicks - sourceInTicks`
+ * es su duración. Solo tiene sentido pegada por posición a sus dos
+ * vecinos de la misma pista — ver `neighborsOfTransition` en
+ * timeline.ts.
  */
 export interface Clip {
   id: string;
   /** Por defecto "clip" — ver ClipKind. */
   kind: ClipKind;
   sourceId: string;
-  /** Punto de entrada, en ticks, dentro del tiempo del SourceFile. Para "gap"/"transition", siempre 0. */
+  /** Posición de inicio absoluta, en ticks, dentro de la timeline de su pista. */
+  startTicks: number;
+  /** Punto de entrada, en ticks, dentro del tiempo del SourceFile. Para "transition", siempre 0. */
   sourceInTicks: number;
-  /** Punto de salida (exclusivo), en ticks, dentro del tiempo del SourceFile. Para "gap"/"transition", es su duración. */
+  /** Punto de salida (exclusivo), en ticks, dentro del tiempo del SourceFile. Para "transition", es su duración. */
   sourceOutTicks: number;
   /** Ganancia de audio del clip, 0-1. Por defecto 1 (sin atenuar). */
   volume: number;
@@ -73,12 +91,20 @@ export interface Clip {
 }
 
 /**
- * Pista de clips ordenados sin huecos. v1 solo usa una Track, pero se
- * modela como su propio tipo pensando en un futuro multipista.
+ * Pista de clips con posición explícita (nunca solapados dentro de la
+ * misma pista). `kind` determina qué contiene y cómo se compone:
+ * "video" participa en la composición por capas opacas (ver
+ * `resolveActiveVideoPosition` en timeline.ts); "audio" solo aporta
+ * sonido, mezclado con el resto de pistas no ocultas. Ampliación de
+ * alcance (multipista) pedida explícitamente el 2026-08-21, ver
+ * CLAUDE.md.
  */
 export interface Track {
   id: string;
+  kind: TrackKind;
   clips: Clip[];
+  /** Excluye la pista entera de previsualización/exportación: en vídeo, deja ver las pistas de abajo; en audio, no suena. Icono en la UI: ojo (vídeo) o altavoz/mute (audio) — misma semántica. */
+  hidden: boolean;
 }
 
 export interface Resolution {
@@ -86,8 +112,9 @@ export interface Resolution {
   height: number;
 }
 
+/** El orden del array es el orden de composición de las pistas de vídeo: índice más alto = capa más arriba (tapa a las de índice más bajo donde tenga contenido). Para audio el orden no afecta al sonido (todas se mezclan), solo a cómo se listan en la UI. */
 export interface Timeline {
-  track: Track;
+  tracks: Track[];
   outputResolution: Resolution;
   outputFrameRate: FrameRate;
 }

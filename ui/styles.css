@@ -491,25 +491,93 @@ kbd {
   white-space: nowrap;
 }
 
-.timeline-track {
+/* --- Pistas (multipista: vídeo/audio, añadibles/quitables) --- */
+/* Ampliación de alcance pedida explícitamente el 2026-08-21 (ver
+   CLAUDE.md): cada pista es una fila con un "gutter" fijo a la
+   izquierda (nombre, ojo/mute, quitar) que se queda pegado al hacer
+   scroll horizontal (position: sticky respecto a #timeline-scroll,
+   que es el contenedor con overflow-x), y un "lane" que ocupa el resto
+   del ancho, donde los clips se posicionan de forma ABSOLUTA según su
+   `startTicks` — ya no hay huecos-bloque en el flujo, un hueco es
+   simplemente el tramo sin ningún .timeline-clip ahí. */
+.timeline-tracks-empty-hint {
+  color: var(--text-dim);
+  padding: 0.6rem;
+}
+
+.timeline-track-group + .timeline-track-group {
+  border-top: 2px solid var(--border);
+}
+
+.timeline-track-row {
   display: flex;
-  /* Ajustable arrastrando #timeline-resize-handle — ver applyTimelineTrackHeight en main.ts. */
-  height: var(--timeline-track-height, 64px);
+  align-items: stretch;
+  width: 100%;
+}
+
+.timeline-track-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  flex: 0 0 132px;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 0.3rem;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.timeline-track-gutter--sub {
+  background: #14151a;
+}
+
+.timeline-track-gutter .track-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+}
+
+.timeline-track-gutter button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.timeline-track-gutter .track-toggle.is-off {
+  opacity: 0.45;
+}
+
+.timeline-track-lane {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  /* Ajustable arrastrando #timeline-resize-handle — ver applyTimelineTrackHeight en main.ts. Se aplica a TODAS las pistas de vídeo por igual. */
   background: #101115;
   cursor: pointer;
 }
 
-.timeline-track:empty::after {
-  content: "Añade un clip para empezar";
-  color: var(--text-dim);
-  display: flex;
-  align-items: center;
-  padding-left: 0.5rem;
+.timeline-track-lane--video {
+  height: var(--timeline-track-height, 64px);
+}
+
+.timeline-track-lane--audio {
+  height: 36px;
+  background: #0b0c0f;
 }
 
 .timeline-clip {
-  position: relative;
-  flex-shrink: 0;
+  position: absolute;
+  top: 0;
   height: 100%;
   min-width: 28px;
   background: var(--clip);
@@ -525,7 +593,13 @@ kbd {
 }
 
 .timeline-clip.selected {
-  background: var(--clip-selected);
+  /* background-color, no el shorthand `background`: este último
+     resetearía background-size/position a sus valores iniciales
+     (pisando el `cover`/`center` de más abajo, que tiene menos
+     especificidad) y la miniatura del clip se vería repetida en
+     mosaico en vez de cubrir el bloque — bug preexistente encontrado
+     verificando la Fase C de la ampliación multipista del 2026-08-21. */
+  background-color: var(--clip-selected);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -562,10 +636,6 @@ kbd {
   border-radius: 3px;
 }
 
-.timeline-clip--gap {
-  background: repeating-linear-gradient(45deg, #2a2c33, #2a2c33 6px, #232529 6px, #232529 12px);
-}
-
 /* Una transición no es "un clip más" en la fila: se dibuja más baja,
    centrada verticalmente y con sombra propia para que se lea como un
    marcador que va POR ENCIMA del corte entre los dos clips vecinos, no
@@ -598,16 +668,9 @@ kbd {
   background: repeating-linear-gradient(-45deg, #4a3a6b, #4a3a6b 6px, #3a2d55 6px, #3a2d55 12px);
 }
 
-.timeline-audio-track {
-  display: flex;
-  height: 36px;
-  background: #0b0c0f;
-  border-top: 1px solid var(--border);
-}
-
 .timeline-audio-cell {
-  position: relative;
-  flex-shrink: 0;
+  position: absolute;
+  top: 0;
   height: 100%;
   border-right: 1px solid #000;
   overflow: hidden;

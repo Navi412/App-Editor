@@ -1,16 +1,17 @@
 import { frameDurationTicks, ticksToSeconds } from "../core/time";
-import type { Clip, Timeline, TransitionType } from "../core/types";
+import { neighborsOfTransition } from "../core/timeline";
+import type { Clip, Track, TransitionType } from "../core/types";
 import { captureFrameBitmap } from "./frameSnapshot";
 import type { DemuxedTrack } from "./samples";
 import { inferFrameRate } from "./sourceFile";
 
 /**
  * Fotogramas fijos que delimitan una transición: el último fotograma
- * decodificable del clip anterior en el array y el primero del
+ * decodificable del clip anterior de su pista y el primero del
  * siguiente (por posición, no por relación guardada — ver
- * core/types.ts sobre por qué un Clip de tipo "transition" no
- * almacena a qué clips conecta). undefined si ese vecino no es un
- * clip de vídeo real (p.ej. otro hueco/transición, o no hay vecino).
+ * neighborsOfTransition en core/timeline.ts). undefined si ese lado no
+ * tiene vecino real (p.ej. transición al principio/final de la pista,
+ * o separada de su vecino por un hueco).
  */
 export interface TransitionBoundaryFrames {
   fromImage?: ImageBitmap;
@@ -20,24 +21,22 @@ export interface TransitionBoundaryFrames {
 /**
  * Decodifica el fotograma de salida (justo antes de sourceOutTicks del
  * clip anterior) y el de entrada (justo en sourceInTicks del clip
- * siguiente) de la transición que ocupa `transitionIndex` en
- * `timeline.track.clips`. No cachea nada — se decodifica de cero cada
- * vez que hace falta (al hacer scrub, reproducir o exportar), así
- * nunca puede quedar obsoleto tras editar los clips vecinos.
+ * siguiente) de `transitionClip`, dentro de `track`. No cachea nada —
+ * se decodifica de cero cada vez que hace falta (al hacer scrub,
+ * reproducir o exportar), así nunca puede quedar obsoleto tras editar
+ * los clips vecinos.
  */
 export async function captureTransitionBoundaryFrames(
-  timeline: Timeline,
-  transitionIndex: number,
+  track: Track,
+  transitionClip: Clip,
   getSource: (sourceId: string) => DemuxedTrack | undefined,
   width: number,
   height: number,
 ): Promise<TransitionBoundaryFrames> {
-  const clips = timeline.track.clips;
-  const prevClip: Clip | undefined = clips[transitionIndex - 1];
-  const nextClip: Clip | undefined = clips[transitionIndex + 1];
+  const { prev: prevClip, next: nextClip } = neighborsOfTransition(track, transitionClip);
 
   let fromImage: ImageBitmap | undefined;
-  if (prevClip && prevClip.kind === "clip") {
+  if (prevClip) {
     const demuxed = getSource(prevClip.sourceId);
     if (demuxed) {
       const frameStep = frameDurationTicks(inferFrameRate(demuxed.samples, demuxed.videoTrack.timescale));
@@ -47,7 +46,7 @@ export async function captureTransitionBoundaryFrames(
   }
 
   let toImage: ImageBitmap | undefined;
-  if (nextClip && nextClip.kind === "clip") {
+  if (nextClip) {
     const demuxed = getSource(nextClip.sourceId);
     if (demuxed) {
       toImage = await captureFrameBitmap(

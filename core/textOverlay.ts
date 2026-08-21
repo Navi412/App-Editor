@@ -18,6 +18,8 @@ export interface TextOverlay {
   color: string;
   /** Valor CSS font-family — ver ui/main.ts TEXT_FONT_OPTIONS para las opciones "básicas" que ofrece la UI. */
   fontFamily: string;
+  /** Rotación en grados, sentido horario, alrededor de (xPercent, yPercent). 0 = sin rotar. */
+  rotationDeg: number;
 }
 
 /** Los overlays activos en un instante de la timeline, en el orden en que deben dibujarse. */

@@ -109,6 +109,15 @@ export function createVideoPlayer(
     decoder.configure({
       codec: videoTrack.codec,
       description: decoderDescription,
+      // Sin hardwareAcceleration explícito (decisión revertida — ver
+      // CLAUDE.md/git log): este decoder se re-cebra a menudo durante el
+      // scrubbing interactivo (cada seek puede necesitar recrear el
+      // decoder o re-alimentarlo desde el keyframe más cercano, ver
+      // primeDecoderIfNeeded más abajo), y forzar "prefer-hardware" ahí
+      // resultó en reproducción/scrubbing MÁS lentos en la práctica —
+      // probablemente por el coste de (re)crear una sesión de
+      // decodificación por hardware con tanta frecuencia. Se deja que el
+      // navegador decida caso por caso.
       ...(videoTrack.video
         ? { codedWidth: videoTrack.video.width, codedHeight: videoTrack.video.height }
         : {}),

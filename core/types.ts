@@ -19,6 +19,20 @@ export type ClipKind = "clip" | "gap" | "transition";
 export type TransitionType = "crossfade" | "dipToBlack";
 
 /**
+ * Un punto de volumen dentro de un clip, para subir/bajar el audio
+ * "por trozos" en vez de un único volumen fijo para todo el clip. Se
+ * interpola linealmente entre puntos consecutivos — ver
+ * volumeAtOffsetTicks en timeline.ts. Si un clip no tiene ninguno, su
+ * volumen es el escalar plano `Clip.volume` de siempre.
+ */
+export interface VolumeKeyframe {
+  /** Ticks relativos al inicio de ESTE clip (0 = su primer fotograma tras cualquier recorte), no a la timeline global. */
+  offsetTicks: number;
+  /** Ganancia 0-1 en ese instante. */
+  volume: number;
+}
+
+/**
  * Un Clip es una referencia a un SourceFile más un rango de tiempo
  * dentro de ese archivo — nunca datos de píxeles copiados. La posición
  * del clip en la línea de tiempo NO se almacena aquí: se deriva de su
@@ -40,10 +54,12 @@ export interface Clip {
   sourceOutTicks: number;
   /** Ganancia de audio del clip, 0-1. Por defecto 1 (sin atenuar). */
   volume: number;
-  /** Si está silenciado, el audio del clip no suena ni se exporta, independientemente de `volume`. */
+  /** Si está silenciado, el audio del clip no suena ni se exporta, independientemente de `volume` o `volumeKeyframes`. */
   muted: boolean;
   /** Solo relevante si kind === "transition". */
   transitionType?: TransitionType;
+  /** Puntos de volumen dentro del clip (orden ascendente por offsetTicks) — ver VolumeKeyframe. undefined/[] = volumen plano (`volume`). */
+  volumeKeyframes?: VolumeKeyframe[];
 }
 
 /**

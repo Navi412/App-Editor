@@ -19,14 +19,28 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font: 13px/1.4 -apple-system, "Segoe UI", sans-serif;
+  /* Todo el editor (cabecera + preview/panel + línea de tiempo) vive
+     dentro de una viewport, sin scroll de página: la línea de tiempo
+     tiene que verse siempre sin bajar. Cada zona que necesite su
+     propio scroll (panel lateral, línea de tiempo) lo hace por dentro. */
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
 }
 
 header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 1rem;
@@ -98,31 +112,47 @@ select {
 }
 
 main {
-  display: grid;
-  grid-template-columns: 1fr 260px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   gap: 1px;
   background: var(--border);
+  overflow: hidden;
+}
+
+.main-top {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 1px;
+  overflow: hidden;
 }
 
 .preview-column {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   padding: 0.75rem 1rem;
-  min-width: 0;
 }
 
 .preview-canvas-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   justify-content: center;
   align-items: center;
   background: #000;
   border: 1px solid var(--border);
-  min-height: 200px;
 }
 
 #preview {
   display: block;
   max-width: 100%;
-  max-height: 55vh;
+  max-height: 100%;
   width: auto;
   height: auto;
   cursor: default;
@@ -133,6 +163,7 @@ main {
 }
 
 .transport {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -146,6 +177,8 @@ main {
 }
 
 .side-panel {
+  flex: 0 0 260px;
+  min-height: 0;
   background: var(--panel);
   padding: 0.75rem;
   overflow-y: auto;
@@ -156,18 +189,111 @@ main {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-dim);
-  margin: 0 0 0.5rem;
+  margin: 0;
 }
 
-.side-panel section {
-  margin-bottom: 1.25rem;
+/* --- Secciones plegables del panel lateral: cada una es su propia "tarjeta", para que se lean como compartimentos separados en vez de un único bloque largo. --- */
+
+.panel-section {
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.6rem;
 }
 
-.trim-row {
+.panel-section > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.55rem 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+}
+
+.panel-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.panel-section > summary::after {
+  content: "▸";
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-shrink: 0;
+  margin-left: 0.5rem;
+  transition: transform 0.15s ease;
+}
+
+.panel-section[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-section[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.panel-section > summary:hover {
+  background: var(--panel);
+}
+
+.panel-section-body {
+  padding: 0.65rem 0.75rem 0.75rem;
+}
+
+/* Grupo de campos relacionados dentro de una sección (p.ej. "Contenido"/"Estilo"/"Posición" del editor de texto) — una franja separadora fina entre grupos, sin caja propia, para no anidar demasiadas cajas dentro de la tarjeta. */
+.field-group {
+  padding-top: 0.6rem;
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--border);
+}
+
+.field-group:first-child {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: none;
+}
+
+.field-group-label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 0.4rem;
+}
+
+/* Varios campos cortos uno junto a otro (Inicio/Fin, X/Y/Rotación...) en vez de apilados a lo largo — la principal queja de "demasiada información" era esta lista vertical interminable. */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.field-grid.field-grid-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.field-grid label {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  margin-bottom: 0.5rem;
+  align-items: stretch;
+  gap: 0.2rem;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.field-grid input,
+.field-grid select {
+  width: 100%;
+}
+
+.panel-section-body label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
 }
 
 .hint-inline {
@@ -176,19 +302,15 @@ main {
   margin: 0.35rem 0 0;
 }
 
-.trim-row label {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.5rem;
-}
-
 .checkbox-row {
-  justify-content: flex-start !important;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.4rem;
 }
 
 .checkbox-row input[type="checkbox"] {
-  margin: 0 0.4rem 0 0;
+  margin: 0;
 }
 
 .shortcuts {
@@ -216,9 +338,9 @@ kbd {
 }
 
 .timeline-section {
+  flex: 0 0 auto;
   background: var(--bg);
   padding: 0.6rem 1rem 1rem;
-  grid-column: 1 / -1;
 }
 
 .timeline-toolbar {
@@ -245,8 +367,35 @@ kbd {
   width: 3.6rem;
 }
 
+.timeline-body {
+  display: flex;
+  align-items: stretch;
+}
+
+.timeline-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.35rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-right: none;
+  flex-shrink: 0;
+}
+
+.timeline-tools button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 
 .timeline-scroll {
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   border: 1px solid var(--border);
@@ -316,14 +465,6 @@ kbd {
   outline-offset: -2px;
 }
 
-.timeline-clip.drag-over-before {
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-
-.timeline-clip.drag-over-after {
-  box-shadow: inset -3px 0 0 var(--accent);
-}
-
 .timeline-clip .clip-name {
   display: block;
   font-size: 11px;
@@ -355,7 +496,35 @@ kbd {
   background: repeating-linear-gradient(45deg, #2a2c33, #2a2c33 6px, #232529 6px, #232529 12px);
 }
 
+/* Una transición no es "un clip más" en la fila: se dibuja más baja,
+   centrada verticalmente y con sombra propia para que se lea como un
+   marcador que va POR ENCIMA del corte entre los dos clips vecinos, no
+   como un tercer clip en igualdad de condiciones. Arrastrar su cuerpo
+   la alarga/acorta directamente — ver beginTransitionResizeDrag. */
 .timeline-clip--transition {
+  top: 10px;
+  height: 44px;
+  z-index: 2;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  outline: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+  cursor: ew-resize;
+  background: repeating-linear-gradient(-45deg, #4a3a6b, #4a3a6b 6px, #3a2d55 6px, #3a2d55 12px);
+}
+
+.timeline-clip--transition:active {
+  cursor: ew-resize;
+}
+
+.timeline-clip--transition.selected {
+  border-color: var(--text);
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.55),
+    0 0 0 2px var(--accent);
+  /* .timeline-clip.selected pone un fondo azul plano con más especificidad
+     que el degradado rayado de abajo — se repite aquí para no perder el
+     patrón distintivo de "transición" al seleccionarla. */
   background: repeating-linear-gradient(-45deg, #4a3a6b, #4a3a6b 6px, #3a2d55 6px, #3a2d55 12px);
 }
 
@@ -367,6 +536,7 @@ kbd {
 }
 
 .timeline-audio-cell {
+  position: relative;
   flex-shrink: 0;
   height: 100%;
   border-right: 1px solid #000;
@@ -381,6 +551,117 @@ kbd {
 
 .timeline-audio-cell.no-audio {
   background: repeating-linear-gradient(45deg, #1a1b20, #1a1b20 4px, #16171b 4px, #16171b 8px);
+}
+
+.timeline-audio-cell.has-volume {
+  cursor: ns-resize;
+}
+
+.timeline-audio-cell .volume-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #ffb84f;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.timeline-audio-cell.muted .volume-line {
+  background: var(--text-dim);
+  opacity: 0.7;
+}
+
+.timeline-audio-cell .volume-label {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 9px;
+  color: #ffb84f;
+  pointer-events: none;
+  text-shadow: 0 1px 1px #000;
+}
+
+.timeline-audio-cell.muted .volume-label {
+  color: var(--text-dim);
+}
+
+.volume-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.volume-svg polyline {
+  fill: none;
+  stroke: #ffb84f;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.timeline-audio-cell.muted .volume-svg polyline {
+  stroke: var(--text-dim);
+  opacity: 0.7;
+}
+
+.volume-point {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ffb84f;
+  border: 1px solid #1b1d23;
+  transform: translate(-50%, -50%);
+  cursor: ns-resize;
+  z-index: 2;
+}
+
+.volume-point:hover {
+  background: #ffd08a;
+}
+
+/* --- Pista de texto --- */
+
+.timeline-text-track {
+  position: relative;
+  height: 26px;
+  background: #14121a;
+  border-top: 1px solid var(--border);
+}
+
+.timeline-text-clip {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  min-width: 10px;
+  background: linear-gradient(180deg, #6b3f8f, #4a2d63);
+  border: 1px solid #000;
+  border-radius: 3px;
+  padding: 0 6px;
+  overflow: hidden;
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  color: var(--text);
+}
+
+.timeline-text-clip:active {
+  cursor: grabbing;
+}
+
+.timeline-text-clip.selected {
+  background: linear-gradient(180deg, #8a56b8, #6b3f8f);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.timeline-text-clip .text-clip-label {
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .timeline-playhead {
@@ -414,6 +695,7 @@ kbd {
 }
 
 .project-status {
+  flex: 0 0 auto;
   padding: 0 1rem;
   margin: 0.3rem 0 0;
   color: var(--text-dim);
@@ -509,6 +791,11 @@ kbd {
 
 .marker-list .marker-jump:hover {
   color: var(--text);
+}
+
+.marker-list .marker-jump.selected-row {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .marker-list .marker-remove {

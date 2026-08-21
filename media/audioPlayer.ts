@@ -1,3 +1,5 @@
+import type { VolumeAutomationPoint } from "../core/timeline";
+
 /**
  * Reproducción de una porción de un AudioBuffer ya decodificado, vía
  * Web Audio. Cada `play()` crea un AudioBufferSourceNode nuevo (son de
@@ -10,18 +12,32 @@ export interface AudioPlaybackHandle {
   stop(): void;
 }
 
+/** Programa la rampa de ganancia (ver core/timeline.ts volumeAutomationFrom) sobre un GainNode ya creado, ancladas a `when`. Reutilizada también por export/exportTimeline.ts. */
+export function scheduleGain(gainParam: AudioParam, points: readonly VolumeAutomationPoint[], when: number): void {
+  const first = points[0];
+  gainParam.setValueAtTime(first ? first.volume : 1, when);
+  for (let i = 1; i < points.length; i++) {
+    gainParam.linearRampToValueAtTime(points[i]!.volume, when + points[i]!.offsetSeconds);
+  }
+}
+
+/** `BaseAudioContext` en vez de `AudioContext`: así también sirve para un `OfflineAudioContext` (export/exportTimeline.ts), que comparte createBufferSource/createGain/destination pero no es un AudioContext en directo. */
 export function playAudioSlice(
-  audioContext: AudioContext,
+  audioContext: BaseAudioContext,
   buffer: AudioBuffer,
   offsetSeconds: number,
   durationSeconds: number,
   when: number,
-  gain = 1,
+  gain: number | VolumeAutomationPoint[] = 1,
 ): AudioPlaybackHandle {
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
   const gainNode = audioContext.createGain();
-  gainNode.gain.value = gain;
+  if (Array.isArray(gain)) {
+    scheduleGain(gainNode.gain, gain, when);
+  } else {
+    gainNode.gain.value = gain;
+  }
   source.connect(gainNode);
   gainNode.connect(audioContext.destination);
   const safeOffset = Math.max(0, Math.min(offsetSeconds, buffer.duration));

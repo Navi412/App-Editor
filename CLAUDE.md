@@ -27,6 +27,21 @@ primero del siguiente y hace un fundido entre ambos durante su propia
 duración — es la versión "básica" pedida, no una transición con
 movimiento real dentro de la propia transición.
 
+**Volumen por trozos dentro de un clip — ampliación de alcance pedida
+explícitamente el 2026-08-21.** Un clip puede llevar, además de su
+`volume` plano de siempre, una lista opcional `volumeKeyframes` de
+puntos `{ offsetTicks, volume }` (ticks relativos al inicio del propio
+clip). Sin puntos, el volumen sigue siendo el escalar plano de
+siempre. Con puntos, se interpola linealmente entre ellos —
+`volumeAtOffsetTicks`/`volumeAutomationFrom` en `core/timeline.ts` son
+el único sitio que sabe hacer esa interpolación; tanto la reproducción
+(`media/audioPlayer.ts`, vía `GainNode.gain.linearRampToValueAtTime`)
+como la exportación (`export/exportTimeline.ts`, mismo mecanismo sobre
+`OfflineAudioContext`) consumen esos mismos puntos, nunca recalculan
+la rampa por su cuenta. En la UI se editan Alt+clic/arrastrando
+directamente sobre la pista de audio de la línea de tiempo — no hay
+edición de keyframes de vídeo ni de otros parámetros, solo de volumen.
+
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:** efectos/filtros de vídeo, multipista de vídeo (varios
 clips de vídeo superpuestos), cambios de velocidad.

@@ -1,20 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { secondsToTicks } from "./time";
 import {
+  addVolumeKeyframe,
   appendClip,
+  audioHeadCutTicks,
+  audioTailCutTicks,
   clipDurationTicks,
   clipStartTicks,
   createGap,
   createTransition,
   effectiveClipVolume,
   insertClipAt,
+  moveClipByDelta,
+  moveVolumeKeyframe,
   removeClip,
+  removeVolumeKeyframe,
   reorderClip,
   setClipAudio,
   splitClipAt,
   timelineDurationTicks,
+  transitionAudioCues,
   trimClipIn,
   trimClipOut,
+  volumeAtOffsetTicks,
+  volumeAutomationFrom,
   walkTimeline,
 } from "./timeline";
 import type { Clip, Timeline } from "./types";
@@ -301,5 +310,280 @@ describe("createGap / createTransition / insertClipAt", () => {
     expect(posInGap?.clip.kind).toBe("gap");
     const posInB = walkTimeline(next, secondsToTicks(3.5));
     expect(posInB?.sourceId).toBe("source-b");
+  });
+});
+
+describe("moveClipByDelta", () => {
+  it("un desplazamiento positivo crea un hueco nuevo delante del clip si no había", () => {
+    const timeline = twoClipTimeline();
+    const next = moveClipByDelta(timeline, "b", secondsToTicks(1), "gap-1");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "gap-1", "b"]);
+    expect(clipDurationTicks(next.track.clips[1]!)).toBe(secondsToTicks(1));
+    expect(timelineDurationTicks(next)).toBe(timelineDurationTicks(timeline) + secondsToTicks(1));
+  });
+
+  it("un desplazamiento positivo crece un hueco ya existente delante del clip", () => {
+    const timeline = insertClipAt(twoClipTimeline(), 1, createGap("gap-1", secondsToTicks(1)));
+    const next = moveClipByDelta(timeline, "b", secondsToTicks(0.5), "gap-unused");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "gap-1", "b"]);
+    expect(clipDurationTicks(next.track.clips[1]!)).toBe(secondsToTicks(1.5));
+  });
+
+  it("un desplazamiento negativo encoge el hueco delante del clip", () => {
+    const timeline = insertClipAt(twoClipTimeline(), 1, createGap("gap-1", secondsToTicks(1)));
+    const next = moveClipByDelta(timeline, "b", -secondsToTicks(0.4), "gap-unused");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "gap-1", "b"]);
+    expect(clipDurationTicks(next.track.clips[1]!)).toBe(secondsToTicks(0.6));
+  });
+
+  it("un desplazamiento negativo que consume el hueco entero lo elimina y deja los clips pegados", () => {
+    const timeline = insertClipAt(twoClipTimeline(), 1, createGap("gap-1", secondsToTicks(1)));
+    const next = moveClipByDelta(timeline, "b", -secondsToTicks(1), "gap-unused");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "b"]);
+    expect(timelineDurationTicks(next)).toBe(timelineDurationTicks(twoClipTimeline()));
+  });
+
+  it("un desplazamiento negativo menor que el vecino real (sin hueco de por medio) se recorta a 0", () => {
+    const timeline = twoClipTimeline(); // "a" (2s) y "b" (3s), pegados, sin hueco
+    const next = moveClipByDelta(timeline, "b", -secondsToTicks(1), "gap-unused");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "b"]);
+    expect(next.track.clips).toEqual(timeline.track.clips);
+  });
+
+  it("un desplazamiento negativo igual o mayor que el vecino real reordena (pasa a través de él)", () => {
+    const timeline: Timeline = {
+      track: {
+        id: "track-1",
+        clips: [clip("a", "source-a", 0, 2), clip("b", "source-b", 0, 3), clip("c", "source-c", 0, 4)],
+      },
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const next = moveClipByDelta(timeline, "c", -secondsToTicks(3), "gap-unused");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["a", "c", "b"]);
+    expect(timelineDurationTicks(next)).toBe(timelineDurationTicks(timeline));
+  });
+
+  it("no se puede desplazar antes del principio de la timeline: se recorta a 0", () => {
+    const timeline = twoClipTimeline();
+    const next = moveClipByDelta(timeline, "a", -secondsToTicks(1), "gap-unused");
+    expect(next.track.clips).toEqual(timeline.track.clips);
+  });
+
+  it("un desplazamiento positivo del primer clip crea un hueco delante de todo", () => {
+    const timeline = twoClipTimeline();
+    const next = moveClipByDelta(timeline, "a", secondsToTicks(0.5), "gap-1");
+    expect(next.track.clips.map((c) => c.id)).toEqual(["gap-1", "a", "b"]);
+    expect(clipDurationTicks(next.track.clips[0]!)).toBe(secondsToTicks(0.5));
+  });
+
+  it("un id de clip inexistente devuelve la timeline sin cambios", () => {
+    const timeline = twoClipTimeline();
+    const next = moveClipByDelta(timeline, "no-existe", secondsToTicks(1), "gap-1");
+    expect(next).toBe(timeline);
+  });
+});
+
+describe("volumen por trozos (VolumeKeyframe)", () => {
+  it("volumeAtOffsetTicks sin puntos es el volumen plano del clip (0 si está silenciado)", () => {
+    const a = clip("a", "source-a", 0, 2);
+    expect(volumeAtOffsetTicks(a, secondsToTicks(1))).toBe(1);
+    expect(volumeAtOffsetTicks({ ...a, muted: true }, secondsToTicks(1))).toBe(0);
+  });
+
+  it("volumeAtOffsetTicks interpola linealmente entre dos puntos", () => {
+    const a: Clip = {
+      ...clip("a", "source-a", 0, 2),
+      volumeKeyframes: [
+        { offsetTicks: secondsToTicks(0.5), volume: 0 },
+        { offsetTicks: secondsToTicks(1.5), volume: 1 },
+      ],
+    };
+    expect(volumeAtOffsetTicks(a, secondsToTicks(1))).toBeCloseTo(0.5, 5);
+    expect(volumeAtOffsetTicks(a, secondsToTicks(0.5))).toBeCloseTo(0, 5);
+    expect(volumeAtOffsetTicks(a, secondsToTicks(1.5))).toBeCloseTo(1, 5);
+  });
+
+  it("volumeAtOffsetTicks se mantiene plano fuera del primer/último punto", () => {
+    const a: Clip = {
+      ...clip("a", "source-a", 0, 2),
+      volumeKeyframes: [
+        { offsetTicks: secondsToTicks(0.5), volume: 0.2 },
+        { offsetTicks: secondsToTicks(1.5), volume: 0.8 },
+      ],
+    };
+    expect(volumeAtOffsetTicks(a, 0)).toBeCloseTo(0.2, 5);
+    expect(volumeAtOffsetTicks(a, secondsToTicks(2))).toBeCloseTo(0.8, 5);
+  });
+
+  it("volumeAtOffsetTicks es 0 si el clip está silenciado, aunque tenga puntos", () => {
+    const a: Clip = {
+      ...clip("a", "source-a", 0, 2),
+      muted: true,
+      volumeKeyframes: [{ offsetTicks: secondsToTicks(1), volume: 1 }],
+    };
+    expect(volumeAtOffsetTicks(a, secondsToTicks(1))).toBe(0);
+  });
+
+  it("addVolumeKeyframe inserta ordenado y recorta offset/volumen a rango", () => {
+    const timeline = twoClipTimeline();
+    let next = addVolumeKeyframe(timeline, 0, secondsToTicks(1.5), 0.5);
+    next = addVolumeKeyframe(next, 0, secondsToTicks(0.5), 2); // volumen fuera de rango -> se recorta a 1
+    next = addVolumeKeyframe(next, 0, -secondsToTicks(1), -1); // offset/volumen negativos -> se recortan a 0
+    const keyframes = next.track.clips[0]!.volumeKeyframes!;
+    expect(keyframes.map((k) => k.offsetTicks)).toEqual([0, secondsToTicks(0.5), secondsToTicks(1.5)]);
+    expect(keyframes[0]!.volume).toBe(0);
+    expect(keyframes[1]!.volume).toBe(1);
+    expect(keyframes[2]!.volume).toBe(0.5);
+  });
+
+  it("removeVolumeKeyframe quita el punto y deja volumeKeyframes undefined si no queda ninguno", () => {
+    const timeline = addVolumeKeyframe(twoClipTimeline(), 0, secondsToTicks(1), 0.5);
+    const next = removeVolumeKeyframe(timeline, 0, 0);
+    expect(next.track.clips[0]!.volumeKeyframes).toBeUndefined();
+  });
+
+  it("removeVolumeKeyframe con un índice inexistente no cambia nada", () => {
+    const timeline = addVolumeKeyframe(twoClipTimeline(), 0, secondsToTicks(1), 0.5);
+    const next = removeVolumeKeyframe(timeline, 0, 5);
+    expect(next).toBe(timeline);
+  });
+
+  it("moveVolumeKeyframe se recorta para no cruzar a sus vecinos", () => {
+    let timeline = addVolumeKeyframe(twoClipTimeline(), 0, secondsToTicks(0.5), 0.2);
+    timeline = addVolumeKeyframe(timeline, 0, secondsToTicks(1.5), 0.8);
+    // Intenta mover el primer punto (0.5s) más allá del segundo (1.5s) -> se recorta a 1.5s.
+    const next = moveVolumeKeyframe(timeline, 0, 0, secondsToTicks(3), 0.9);
+    const keyframes = next.track.clips[0]!.volumeKeyframes!;
+    expect(keyframes[0]!.offsetTicks).toBe(secondsToTicks(1.5));
+    expect(keyframes[0]!.volume).toBe(0.9);
+    expect(keyframes[1]!.offsetTicks).toBe(secondsToTicks(1.5));
+  });
+
+  it("volumeAutomationFrom sin puntos devuelve un único punto con el volumen plano", () => {
+    const a = clip("a", "source-a", 0, 2);
+    const points = volumeAutomationFrom(a, 0);
+    expect(points).toEqual([{ offsetSeconds: 0, volume: 1 }]);
+  });
+
+  it("volumeAutomationFrom empezando a mitad de una rampa arranca ya en el valor interpolado", () => {
+    const a: Clip = {
+      ...clip("a", "source-a", 0, 2),
+      volumeKeyframes: [
+        { offsetTicks: secondsToTicks(0.5), volume: 0 },
+        { offsetTicks: secondsToTicks(1.5), volume: 1 },
+      ],
+    };
+    const points = volumeAutomationFrom(a, secondsToTicks(1));
+    expect(points[0]!.offsetSeconds).toBe(0);
+    expect(points[0]!.volume).toBeCloseTo(0.5, 5);
+    expect(points[1]!.offsetSeconds).toBeCloseTo(0.5, 5); // 1.5s - 1s
+    expect(points[1]!.volume).toBeCloseTo(1, 5);
+  });
+
+  it("volumeAutomationFrom en un clip silenciado devuelve solo un punto a volumen 0", () => {
+    const a: Clip = {
+      ...clip("a", "source-a", 0, 2),
+      muted: true,
+      volumeKeyframes: [{ offsetTicks: secondsToTicks(1), volume: 1 }],
+    };
+    expect(volumeAutomationFrom(a, 0)).toEqual([{ offsetSeconds: 0, volume: 0 }]);
+  });
+});
+
+/** "a" (3s) — transición de 0.5s — "b" (4s), sin huecos. */
+function transitionTimeline(): Timeline {
+  return {
+    track: {
+      id: "track-1",
+      clips: [
+        clip("a", "source-a", 0, 3),
+        createTransition("t1", secondsToTicks(0.5), "crossfade"),
+        clip("b", "source-b", 0, 4),
+      ],
+    },
+    outputResolution: { width: 1920, height: 1080 },
+    outputFrameRate: { numerator: 30, denominator: 1 },
+  };
+}
+
+describe("audio durante una transición", () => {
+  it("audioTailCutTicks/audioHeadCutTicks recortan la duración de la transición cuando el vecino es más largo", () => {
+    const timeline = transitionTimeline();
+    expect(audioTailCutTicks(timeline, 0)).toBe(secondsToTicks(0.5)); // "a", antes de la transición
+    expect(audioHeadCutTicks(timeline, 2)).toBe(secondsToTicks(0.5)); // "b", después de la transición
+  });
+
+  it("audioTailCutTicks/audioHeadCutTicks son 0 si no hay transición al lado", () => {
+    const timeline = transitionTimeline();
+    expect(audioHeadCutTicks(timeline, 0)).toBe(0); // "a" no tiene nada antes
+    expect(audioTailCutTicks(timeline, 2)).toBe(0); // "b" no tiene nada después
+  });
+
+  it("el recorte se limita a la duración del propio vecino si es más corto que la transición", () => {
+    const timeline: Timeline = {
+      track: {
+        id: "track-1",
+        clips: [clip("a", "source-a", 0, 0.3), createTransition("t1", secondsToTicks(0.5), "crossfade")],
+      },
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    expect(audioTailCutTicks(timeline, 0)).toBe(secondsToTicks(0.3));
+  });
+
+  it("transitionAudioCues desde el principio genera un cue por cada vecino con fundido cruzado 1->0 y 0->1", () => {
+    const timeline = transitionTimeline();
+    const cues = transitionAudioCues(timeline, 1, 0);
+    expect(cues).toHaveLength(2);
+
+    const fromCue = cues.find((c) => c.clipIndex === 0)!;
+    expect(fromCue.sourceStartTicks).toBe(secondsToTicks(2.5)); // 3s - 0.5s
+    expect(fromCue.durationTicks).toBe(secondsToTicks(0.5));
+    expect(fromCue.automation[0]!.volume).toBeCloseTo(1, 5);
+    expect(fromCue.automation[1]!.volume).toBeCloseTo(0, 5);
+
+    const toCue = cues.find((c) => c.clipIndex === 2)!;
+    expect(toCue.sourceStartTicks).toBe(0);
+    expect(toCue.durationTicks).toBe(secondsToTicks(0.5));
+    expect(toCue.automation[0]!.volume).toBeCloseTo(0, 5);
+    expect(toCue.automation[1]!.volume).toBeCloseTo(1, 5);
+  });
+
+  it("transitionAudioCues a mitad de la transición arranca ya en la ganancia interpolada", () => {
+    const timeline = transitionTimeline();
+    const cues = transitionAudioCues(timeline, 1, secondsToTicks(0.25));
+    const fromCue = cues.find((c) => c.clipIndex === 0)!;
+    expect(fromCue.durationTicks).toBe(secondsToTicks(0.25));
+    expect(fromCue.sourceStartTicks).toBe(secondsToTicks(2.75)); // 3s - 0.5s + 0.25s
+    expect(fromCue.automation[0]!.volume).toBeCloseTo(0.5, 5);
+  });
+
+  it("transitionAudioCues no genera cue para un lado sin clip real (principio/final de timeline)", () => {
+    const timeline: Timeline = {
+      track: {
+        id: "track-1",
+        clips: [createTransition("t1", secondsToTicks(0.5), "crossfade"), clip("b", "source-b", 0, 4)],
+      },
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const cues = transitionAudioCues(timeline, 0, 0);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]!.clipIndex).toBe(1);
+  });
+
+  it("transitionAudioCues no genera cue para un vecino silenciado", () => {
+    const timeline = transitionTimeline();
+    const muted = { ...timeline, track: { ...timeline.track, clips: [...timeline.track.clips] } };
+    muted.track.clips[0] = { ...muted.track.clips[0]!, muted: true };
+    const cues = transitionAudioCues(muted, 1, 0);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]!.clipIndex).toBe(2);
+  });
+
+  it("transitionAudioCues devuelve vacío si el offset ya supera la duración de la transición", () => {
+    const timeline = transitionTimeline();
+    expect(transitionAudioCues(timeline, 1, secondsToTicks(1))).toEqual([]);
   });
 });

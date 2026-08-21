@@ -12,6 +12,7 @@ function overlay(id: string, startTicks: number, endTicks: number): TextOverlay 
     fontSizePx: 32,
     color: "#fff",
     fontFamily: "sans-serif",
+    rotationDeg: 0,
   };
 }
 

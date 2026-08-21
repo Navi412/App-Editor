@@ -1,13 +1,17 @@
 import { frameDurationTicks, ticksToSeconds } from "../core/time";
 import {
+  audioHeadCutTicks,
+  audioTailCutTicks,
   clipDurationTicks,
   clipStartTicks,
-  effectiveClipVolume,
   timelineDurationTicks,
+  transitionAudioCues,
+  volumeAutomationFrom,
   walkTimeline,
 } from "../core/timeline";
 import type { Timeline } from "../core/types";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
+import { playAudioSlice } from "../media/audioPlayer";
 import { drawFrameFit } from "../media/render";
 import type { DemuxedTrack } from "../media/samples";
 import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
@@ -44,16 +48,25 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 // isConfigSupported() decide cuál usar en vez de asumirlo.
 const CODEC_CANDIDATES = ["avc1.640028", "avc1.4d0028", "avc1.42001f"];
 
+// Se prueba primero CON aceleración por hardware (NVENC/QuickSync/etc. — la
+// exportación es la parte más intensiva en cómputo de todo el pipeline, así
+// que es donde más se nota) y solo se cae a "no-preference" (el navegador
+// decide, puede acabar en software) si ningún candidato de códec soporta
+// hardware — mejor exportar más lento que no exportar.
+const HARDWARE_PREFERENCES: HardwareAcceleration[] = ["prefer-hardware", "no-preference"];
+
 async function selectSupportedEncoderConfig(
-  base: Omit<VideoEncoderConfig, "codec">,
+  base: Omit<VideoEncoderConfig, "codec" | "hardwareAcceleration">,
 ): Promise<VideoEncoderConfig> {
-  for (const codec of CODEC_CANDIDATES) {
-    const config: VideoEncoderConfig = { ...base, codec };
-    try {
-      const support = await VideoEncoder.isConfigSupported(config);
-      if (support.supported) return config;
-    } catch {
-      // seguir probando el siguiente candidato
+  for (const hardwareAcceleration of HARDWARE_PREFERENCES) {
+    for (const codec of CODEC_CANDIDATES) {
+      const config: VideoEncoderConfig = { ...base, codec, hardwareAcceleration };
+      try {
+        const support = await VideoEncoder.isConfigSupported(config);
+        if (support.supported) return config;
+      } catch {
+        // seguir probando el siguiente candidato
+      }
     }
   }
   throw new Error(
@@ -214,38 +227,65 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
 /**
  * Renderiza el audio de toda la timeline en una sola pasada de
  * OfflineAudioContext: cada clip se programa a su posición acumulada
- * (mismo criterio de "ripple" que /core), recortado a su propio rango
- * de entrada/salida — el propio OfflineAudioContext remuestrea si la
- * fuente no está ya al sample rate del proyecto. Los clips cuya fuente
- * no tiene audio simplemente no conectan nada ahí: queda en silencio,
- * sin desincronizar el resto.
+ * (mismo criterio de "ripple" que /core) — el propio OfflineAudioContext
+ * remuestrea si la fuente no está ya al sample rate del proyecto. Los
+ * clips cuya fuente no tiene audio simplemente no conectan nada ahí:
+ * queda en silencio, sin desincronizar el resto.
+ *
+ * Una transición no tiene audio propio, pero tampoco deja un hueco de
+ * silencio: la franja de audio que le corresponde se resta de la
+ * reproducción normal del clip saliente/entrante (audioHeadCutTicks/
+ * audioTailCutTicks) y se reproduce ahí, con fundido cruzado
+ * (transitionAudioCues) — mismas funciones puras de /core que usa la
+ * reproducción en directo en ui/main.ts, así preview y export nunca
+ * pueden divergir en esto.
  */
 async function renderExportAudio(timeline: Timeline, getAudio: (sourceId: string) => AudioBuffer | undefined): Promise<AudioBuffer> {
   const totalSeconds = Math.max(ticksToSeconds(timelineDurationTicks(timeline)), 1 / AUDIO_SAMPLE_RATE);
   const totalFrames = Math.max(1, Math.ceil(totalSeconds * AUDIO_SAMPLE_RATE));
   const offline = new OfflineAudioContext(AUDIO_CHANNELS, totalFrames, AUDIO_SAMPLE_RATE);
 
+  const clips = timeline.track.clips;
   let cursorSeconds = 0;
-  for (const clip of timeline.track.clips) {
-    const durationSeconds = ticksToSeconds(clip.sourceOutTicks - clip.sourceInTicks);
-    const sourceBuffer = getAudio(clip.sourceId);
-    const gain = effectiveClipVolume(clip);
-    if (sourceBuffer && durationSeconds > 0 && gain > 0) {
-      const offsetSeconds = ticksToSeconds(clip.sourceInTicks);
-      const safeOffset = Math.max(0, Math.min(offsetSeconds, sourceBuffer.duration));
-      const safeDuration = Math.max(0, Math.min(durationSeconds, sourceBuffer.duration - safeOffset));
-      if (safeDuration > 0) {
-        const bufferSource = offline.createBufferSource();
-        bufferSource.buffer = sourceBuffer;
-        const gainNode = offline.createGain();
-        gainNode.gain.value = gain;
-        bufferSource.connect(gainNode);
-        gainNode.connect(offline.destination);
-        bufferSource.start(cursorSeconds, safeOffset, safeDuration);
+  clips.forEach((clip, index) => {
+    const durationSeconds = ticksToSeconds(clipDurationTicks(clip));
+
+    if (clip.kind === "clip") {
+      const sourceBuffer = getAudio(clip.sourceId);
+      if (sourceBuffer && !clip.muted) {
+        const headCutTicks = audioHeadCutTicks(timeline, index);
+        const playDurationTicks = clipDurationTicks(clip) - headCutTicks - audioTailCutTicks(timeline, index);
+        if (playDurationTicks > 0) {
+          playAudioSlice(
+            offline,
+            sourceBuffer,
+            ticksToSeconds(clip.sourceInTicks + headCutTicks),
+            ticksToSeconds(playDurationTicks),
+            cursorSeconds + ticksToSeconds(headCutTicks),
+            volumeAutomationFrom(clip, headCutTicks),
+          );
+        }
+      }
+    } else if (clip.kind === "transition") {
+      // El export siempre entra en la transición desde su propio
+      // inicio (startOffsetTicks=0), nunca a mitad — a diferencia de
+      // la reproducción en vivo, que puede retomarla tras un seek.
+      for (const cue of transitionAudioCues(timeline, index, 0)) {
+        const neighborBuffer = getAudio(clips[cue.clipIndex]?.sourceId ?? "");
+        if (!neighborBuffer) continue;
+        playAudioSlice(
+          offline,
+          neighborBuffer,
+          ticksToSeconds(cue.sourceStartTicks),
+          ticksToSeconds(cue.durationTicks),
+          cursorSeconds,
+          cue.automation,
+        );
       }
     }
+
     cursorSeconds += durationSeconds;
-  }
+  });
 
   return offline.startRendering();
 }

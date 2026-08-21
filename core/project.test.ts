@@ -49,6 +49,7 @@ function sampleTextOverlays(): TextOverlay[] {
       fontSizePx: 48,
       color: "#fff",
       fontFamily: "sans-serif",
+      rotationDeg: 0,
     },
   ];
 }

@@ -15,11 +15,12 @@
       <button id="load-project-button" type="button" title="Cargar proyecto">📂 Cargar</button>
       <input id="project-file-input" type="file" accept="application/json,.json" hidden />
       <input id="project-sources-input" type="file" accept="video/mp4" multiple hidden />
-      <span class="hint">Arrastra los clips o sus bordes · Ctrl+rueda para zoom</span>
+      <span class="hint">Arrastra un clip para moverlo (crea o cierra huecos) · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
     </header>
     <p id="project-status" class="project-status"></p>
 
     <main>
+     <div class="main-top">
       <div class="preview-column">
         <div class="preview-canvas-wrap" id="preview-wrap">
           <canvas id="preview"></canvas>
@@ -35,137 +36,187 @@
       </div>
 
       <aside class="side-panel">
-        <section>
-          <h2>Recorte del clip seleccionado</h2>
-          <fieldset id="trim-controls" disabled style="border: none; padding: 0; margin: 0">
-            <div class="trim-row">
-              <label>Entrada (s) <input id="trim-in" type="number" step="0.1" min="0" value="0" /></label>
-              <label>Salida (s) <input id="trim-out" type="number" step="0.1" min="0" value="0" /></label>
-            </div>
-            <button id="apply-trim" type="button" class="primary">Aplicar recorte</button>
-            <div class="trim-row">
-              <label
-                >Volumen
-                <input id="clip-volume" type="range" min="0" max="1" step="0.01" value="1" />
-              </label>
-              <label class="checkbox-row"><input id="clip-muted" type="checkbox" /> Silenciar clip</label>
-            </div>
-          </fieldset>
-        </section>
-
-        <section>
-          <h2>Salida</h2>
-          <fieldset id="output-controls" disabled style="border: none; padding: 0; margin: 0">
-            <div class="trim-row">
-              <label>Ancho (px) <input id="output-width" type="number" step="1" min="1" /></label>
-              <label>Alto (px) <input id="output-height" type="number" step="1" min="1" /></label>
-              <label>Fotogramas/s <input id="output-fps" type="number" step="0.001" min="0.001" /></label>
-            </div>
-            <button id="apply-output" type="button" class="primary">Aplicar salida</button>
-          </fieldset>
-        </section>
-
-        <section>
-          <h2>Marcadores</h2>
-          <button id="add-marker-button" type="button" disabled title="Añadir marcador en el playhead (M)">
-            🏳 Añadir marcador (M)
-          </button>
-          <ul id="marker-list" class="marker-list"></ul>
-        </section>
-
-        <section>
-          <h2>Texto</h2>
-          <div class="trim-row">
-            <label>Texto <input id="text-content" type="text" placeholder="Escribe aquí" /></label>
-            <label>Inicio (s) <input id="text-start" type="number" step="0.1" min="0" value="0" /></label>
-            <label>Fin (s) <input id="text-end" type="number" step="0.1" min="0" value="2" /></label>
-            <label>Tamaño (px) <input id="text-size" type="number" step="1" min="8" value="48" /></label>
-            <label>Color <input id="text-color" type="color" value="#ffffff" /></label>
-            <label
-              >Tipografía
-              <select id="text-font">
-                <option value="sans-serif">Sans-serif</option>
-                <option value="serif">Serif</option>
-                <option value="monospace">Monoespaciada</option>
-                <option value="Impact, sans-serif">Impact</option>
-                <option value="'Comic Sans MS', cursive">Comic Sans</option>
-              </select>
-            </label>
-            <label>X (%) <input id="text-x" type="number" step="1" min="0" max="100" value="50" /></label>
-            <label>Y (%) <input id="text-y" type="number" step="1" min="0" max="100" value="85" /></label>
+        <details class="panel-section" id="trim-details">
+          <summary><h2>Recorte del clip</h2></summary>
+          <div class="panel-section-body">
+            <fieldset id="trim-controls" disabled style="border: none; padding: 0; margin: 0">
+              <div class="field-grid">
+                <label>Entrada (s) <input id="trim-in" type="number" step="0.1" min="0" value="0" /></label>
+                <label>Salida (s) <input id="trim-out" type="number" step="0.1" min="0" value="0" /></label>
+              </div>
+              <button id="apply-trim" type="button" class="primary">Aplicar recorte</button>
+              <div class="field-group">
+                <label class="checkbox-row"><input id="clip-muted" type="checkbox" /> Silenciar clip</label>
+                <p class="hint-inline">
+                  Arrastra la pista de audio (abajo) para el volumen · Alt+clic ahí para editarlo por trozos.
+                </p>
+              </div>
+            </fieldset>
           </div>
-          <button id="add-text-button" type="button" disabled class="primary">Añadir texto</button>
-          <p class="hint-inline">Arrastra el texto directamente sobre el preview para moverlo.</p>
-          <ul id="text-overlay-list" class="marker-list"></ul>
-        </section>
+        </details>
 
-        <section>
-          <h2>Exportar</h2>
-          <button id="export-button" type="button" disabled class="primary">Exportar a MP4</button>
-          <button id="cancel-export-button" type="button" hidden>Cancelar exportación</button>
-          <p id="export-status"></p>
-          <p id="export-download"></p>
-        </section>
+        <details class="panel-section" id="output-details">
+          <summary><h2>Salida</h2></summary>
+          <div class="panel-section-body">
+            <fieldset id="output-controls" disabled style="border: none; padding: 0; margin: 0">
+              <div class="field-grid">
+                <label>Ancho (px) <input id="output-width" type="number" step="1" min="1" /></label>
+                <label>Alto (px) <input id="output-height" type="number" step="1" min="1" /></label>
+                <label>Fotogramas/s <input id="output-fps" type="number" step="0.001" min="0.001" /></label>
+              </div>
+              <button id="apply-output" type="button" class="primary">Aplicar salida</button>
+            </fieldset>
+          </div>
+        </details>
 
-        <section>
-          <h2>Atajos de teclado</h2>
-          <ul class="shortcuts">
-            <li><span>Reproducir / Pausa</span><kbd>Espacio</kbd></li>
-            <li><span>Cortar en el playhead</span><kbd>C</kbd></li>
-            <li><span>Añadir marcador</span><kbd>M</kbd></li>
-            <li><span>Eliminar clip seleccionado</span><kbd>Supr</kbd></li>
-            <li><span>Fotograma anterior / siguiente</span><kbd>←</kbd> <kbd>→</kbd></li>
-            <li><span>Ir al inicio / final</span><kbd>Inicio</kbd> <kbd>Fin</kbd></li>
-            <li><span>Deshacer / Rehacer</span><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></li>
-            <li><span>Zoom en la línea de tiempo</span><kbd>Ctrl</kbd>+<kbd>rueda</kbd></li>
-            <li><span>Desplazar la línea de tiempo</span><kbd>Shift</kbd>+<kbd>rueda</kbd></li>
-          </ul>
-        </section>
+        <details class="panel-section" id="markers-details">
+          <summary><h2>Marcadores</h2></summary>
+          <div class="panel-section-body">
+            <button id="add-marker-button" type="button" disabled title="Añadir marcador en el playhead (M)">
+              🏳 Añadir marcador (M)
+            </button>
+            <ul id="marker-list" class="marker-list"></ul>
+          </div>
+        </details>
+
+        <details class="panel-section" id="text-details">
+          <summary><h2>Texto</h2></summary>
+          <div class="panel-section-body">
+            <p id="text-editor-empty-hint" class="hint-inline">
+              Pulsa 🔤 (junto a la línea de tiempo) para añadir un texto, o selecciona uno para editarlo.
+            </p>
+            <fieldset id="text-editor" hidden style="border: none; padding: 0; margin: 0">
+              <div class="field-group">
+                <span class="field-group-label">Contenido</span>
+                <label>Texto <input id="text-content" type="text" placeholder="Escribe aquí" /></label>
+                <div class="field-grid">
+                  <label>Inicio (s) <input id="text-start" type="number" step="0.1" min="0" /></label>
+                  <label>Fin (s) <input id="text-end" type="number" step="0.1" min="0" /></label>
+                </div>
+              </div>
+              <div class="field-group">
+                <span class="field-group-label">Estilo</span>
+                <div class="field-grid">
+                  <label>Tamaño (px) <input id="text-size" type="number" step="1" min="8" /></label>
+                  <label>Color <input id="text-color" type="color" /></label>
+                </div>
+                <label
+                  >Tipografía
+                  <select id="text-font">
+                    <option value="sans-serif">Sans-serif</option>
+                    <option value="serif">Serif</option>
+                    <option value="monospace">Monoespaciada</option>
+                    <option value="Impact, sans-serif">Impact</option>
+                    <option value="'Comic Sans MS', cursive">Comic Sans</option>
+                  </select>
+                </label>
+              </div>
+              <div class="field-group">
+                <span class="field-group-label">Posición</span>
+                <div class="field-grid field-grid-3">
+                  <label>X (%) <input id="text-x" type="number" step="1" min="0" max="100" /></label>
+                  <label>Y (%) <input id="text-y" type="number" step="1" min="0" max="100" /></label>
+                  <label>Rotación (°) <input id="text-rotation" type="number" step="1" min="-180" max="180" /></label>
+                </div>
+                <p class="hint-inline">Arrastra en el preview para mover · arrastra el asa de arriba para rotar.</p>
+              </div>
+              <button id="delete-text-button" type="button">🗑 Eliminar (Supr)</button>
+            </fieldset>
+            <ul id="text-overlay-list" class="marker-list"></ul>
+          </div>
+        </details>
+
+        <details class="panel-section" id="export-details" open>
+          <summary><h2>Exportar</h2></summary>
+          <div class="panel-section-body">
+            <div class="field-grid">
+              <label
+                >Calidad
+                <select id="export-quality">
+                  <option value="8000000" selected>Media (8 Mbps)</option>
+                  <option value="12000000">Alta (12 Mbps)</option>
+                  <option value="20000000">Muy alta (20 Mbps)</option>
+                  <option value="4000000">Baja / rápida (4 Mbps)</option>
+                </select>
+              </label>
+              <label
+                >Resolución
+                <select id="export-resolution-preset">
+                  <option value="timeline" selected>Igual que la timeline</option>
+                  <option value="1920x1080">1080p horizontal</option>
+                  <option value="1280x720">720p horizontal</option>
+                  <option value="1080x1920">Vertical (redes)</option>
+                  <option value="1080x1080">Cuadrado</option>
+                </select>
+              </label>
+            </div>
+            <button id="export-button" type="button" disabled class="primary">Exportar a MP4</button>
+            <button id="cancel-export-button" type="button" hidden>Cancelar exportación</button>
+            <p id="export-status"></p>
+            <p id="export-download"></p>
+          </div>
+        </details>
+
+        <details class="panel-section" id="shortcuts-details">
+          <summary><h2>Atajos de teclado</h2></summary>
+          <div class="panel-section-body">
+            <ul class="shortcuts">
+              <li><span>Reproducir / Pausa</span><kbd>Espacio</kbd></li>
+              <li><span>Cortar en el playhead</span><kbd>C</kbd></li>
+              <li><span>Añadir marcador</span><kbd>M</kbd></li>
+              <li><span>Eliminar clip o texto seleccionado</span><kbd>Supr</kbd></li>
+              <li><span>Fotograma anterior / siguiente</span><kbd>←</kbd> <kbd>→</kbd></li>
+              <li><span>Ir al inicio / final</span><kbd>Inicio</kbd> <kbd>Fin</kbd></li>
+              <li><span>Deshacer / Rehacer</span><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></li>
+              <li><span>Zoom en la línea de tiempo</span><kbd>Ctrl</kbd>+<kbd>rueda</kbd></li>
+              <li><span>Desplazar la línea de tiempo</span><kbd>Shift</kbd>+<kbd>rueda</kbd></li>
+            </ul>
+          </div>
+        </details>
       </aside>
+     </div>
 
       <div class="timeline-section">
         <div class="timeline-toolbar">
-          <button id="split-button" type="button" disabled title="Cortar en el playhead (C)">✂ Cortar (C)</button>
-          <button id="delete-clip-button" type="button" disabled title="Eliminar clip seleccionado (Supr)">
-            🗑 Eliminar (Supr)
-          </button>
-          <button
-            id="insert-gap-button"
-            type="button"
-            disabled
-            title="Insertar un hueco (silencio + negro) después del clip seleccionado"
-          >
-            ⬚ Insertar hueco
-          </button>
-          <label class="toolbar-inline"
-            >Duración (s) <input id="gap-duration" type="number" step="0.1" min="0.1" value="1"
-          /></label>
           <select id="transition-type" title="Tipo de transición">
             <option value="crossfade">Fundido cruzado</option>
             <option value="dipToBlack">Fundido a negro</option>
           </select>
           <label class="toolbar-inline"
-            >Duración (s) <input id="transition-duration" type="number" step="0.1" min="0.1" value="0.5"
+            >Duración transición (s) <input id="transition-duration" type="number" step="0.1" min="0.1" value="0.5"
           /></label>
-          <button
-            id="insert-transition-button"
-            type="button"
-            disabled
-            title="Insertar una transición después del clip seleccionado"
-          >
-            ⇄ Insertar transición
-          </button>
           <span class="spacer"></span>
           <button id="zoom-out-button" type="button" disabled title="Alejar">− Zoom</button>
           <button id="zoom-fit-button" type="button" disabled title="Ajustar a la ventana">Ajustar</button>
           <button id="zoom-in-button" type="button" disabled title="Acercar">+ Zoom</button>
         </div>
-        <div id="timeline-scroll" class="timeline-scroll">
-          <div id="timeline-content" class="timeline-content">
-            <div id="timeline-ruler" class="timeline-ruler"></div>
-            <div id="timeline-track" class="timeline-track"></div>
-            <div id="timeline-audio-track" class="timeline-audio-track"></div>
-            <div id="timeline-playhead" class="timeline-playhead"></div>
+        <div class="timeline-body">
+          <div class="timeline-tools">
+            <button id="select-clip-button" type="button" disabled title="Seleccionar el clip que hay en el playhead">
+              🖱
+            </button>
+            <button id="split-button" type="button" disabled title="Cortar en el playhead (C)">✂</button>
+            <button id="delete-clip-button" type="button" disabled title="Eliminar clip seleccionado (Supr)">
+              🗑
+            </button>
+            <button
+              id="insert-transition-button"
+              type="button"
+              disabled
+              title="Insertar una transición después del clip seleccionado"
+            >
+              ⇄
+            </button>
+            <button id="add-text-button" type="button" disabled title="Añadir un texto en el playhead">🔤</button>
+          </div>
+          <div id="timeline-scroll" class="timeline-scroll">
+            <div id="timeline-content" class="timeline-content">
+              <div id="timeline-ruler" class="timeline-ruler"></div>
+              <div id="timeline-track" class="timeline-track"></div>
+              <div id="timeline-audio-track" class="timeline-audio-track"></div>
+              <div id="timeline-text-track" class="timeline-text-track"></div>
+              <div id="timeline-playhead" class="timeline-playhead"></div>
+            </div>
           </div>
         </div>
       </div>

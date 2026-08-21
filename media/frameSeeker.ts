@@ -57,6 +57,14 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
   decoder.configure({
     codec: videoTrack.codec,
     description: decoderDescription,
+    // "prefer-software", no "prefer-hardware": este decoder es de
+    // usar-y-tirar (exportación secuencial, miniaturas, fotogramas fijos
+    // de transición) y puede convivir con el decoder EN VIVO de
+    // media/player.ts (ese sí pide hardware). Las GPU de consumo limitan
+    // las sesiones de decodificación por hardware simultáneas — con una
+    // CPU moderna de bastantes núcleos, software es más rápido aquí que
+    // esperar (o competir por) una sesión de hardware ya ocupada.
+    hardwareAcceleration: "prefer-software",
     ...(videoTrack.video
       ? { codedWidth: videoTrack.video.width, codedHeight: videoTrack.video.height }
       : {}),

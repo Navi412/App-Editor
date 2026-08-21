@@ -1,0 +1,21 @@
+{
+  "name": "app-video",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.5"
+  },
+  "dependencies": {
+    "mp4box": "^2.4.1"
+  }
+}

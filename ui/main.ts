@@ -2,9 +2,8 @@ import { frameDurationTicks, secondsToTicks, ticksToSeconds } from "../core/time
 import {
   addTrack,
   addVolumeKeyframe,
+  allAudioSchedules,
   appendClip,
-  audioHeadCutTicks,
-  audioTailCutTicks,
   clipDurationTicks,
   clipEndTicks,
   createTransition,
@@ -20,18 +19,18 @@ import {
   resolveActiveVideoPosition,
   setClipAudio,
   setClipColorFilter,
+  setClipVideoHidden,
   setTrackHidden,
   splitClipAt,
   timelineDurationTicks,
-  transitionAudioCues,
   trimClipIn,
   trimClipOut,
-  volumeAutomationFrom,
 } from "../core/timeline";
 import { parseProjectFile, serializeProject, type ProjectFile, type ProjectSource } from "../core/project";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import type { Clip, ColorFilterType, Resolution, SourceFile, Timeline, Track, TrackKind, TransitionType } from "../core/types";
 import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
+import { getAppVideoBridge, readFileFromPath } from "./electronBridge";
 import { decodeAudioAsset } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
 import { getDecoderDescription } from "../media/description";
@@ -96,6 +95,7 @@ const trimInInput = requireElement<HTMLInputElement>("#trim-in");
 const trimOutInput = requireElement<HTMLInputElement>("#trim-out");
 const applyTrimButton = requireElement<HTMLButtonElement>("#apply-trim");
 const clipMutedInput = requireElement<HTMLInputElement>("#clip-muted");
+const clipVideoHiddenInput = requireElement<HTMLInputElement>("#clip-video-hidden");
 const clipColorFilterSelect = requireElement<HTMLSelectElement>("#clip-color-filter");
 const outputControls = requireElement<HTMLFieldSetElement>("#output-controls");
 const outputWidthInput = requireElement<HTMLInputElement>("#output-width");
@@ -139,6 +139,8 @@ interface SourceEntry {
   sourceFile: SourceFile;
   demuxed: DemuxedTrack;
   fileName: string;
+  /** Ruta absoluta real del archivo — solo disponible dentro de Electron (ver ui/electronBridge.ts), capturada con getPathForFile en cuanto se obtiene el File. Permite reabrir el proyecto sin volver a pedir el archivo si sigue en el mismo sitio. */
+  filePath?: string;
   thumbnail?: string;
   audio?: AudioBuffer;
   waveformPeaks?: Float32Array;
@@ -171,7 +173,13 @@ type ActiveSegment =
   | { kind: "transition"; trackId: string; clip: Clip }
   | { kind: "gap"; endTicks: number };
 
-const WAVEFORM_BUCKET_COUNT = 400;
+// Antes 400: se notaba escalonada/en bloques al recortar un clip corto
+// o hacer zoom, porque el número de cubos disponibles para esa porción
+// caía muy por debajo de los píxeles disponibles en pantalla. 3000 es
+// suficiente detalle incluso para un clip recortado a una fracción
+// pequeña de una fuente larga, sin disparar el coste de memoria
+// (Float32Array de 3000*2 = 24KB por fuente).
+const WAVEFORM_BUCKET_COUNT = 3000;
 
 const sources = new Map<string, SourceEntry>();
 let timeline: Timeline | undefined;
@@ -194,14 +202,51 @@ let textOverlays: TextOverlay[] = [];
 // primer gesto del usuario (política de autoplay); se reanuda al
 // primer play().
 const audioContext = new AudioContext();
-// Normalmente una sola reproducción activa, pero una transición suena
-// DOS a la vez (fundido cruzado del clip saliente y el entrante) — ver
-// playTransitionFrom.
+// TODAS las franjas de audio de la timeline (de cualquier pista no
+// oculta, no solo la del clip de vídeo que se ve ahora mismo — ver
+// CLAUDE.md) se programan de una sola vez al arrancar la reproducción
+// (scheduleAllTrackAudio), así que puede haber muchas activas a la
+// vez. Se paran todas juntas al pausar/parar/saltar — nunca se
+// reprograman en cada transición de clip/hueco/transición dentro de
+// una misma sesión de reproducción, porque ya quedaron programadas
+// por adelantado con AudioBufferSourceNode.start(when).
 let activeAudioHandles: AudioPlaybackHandle[] = [];
 
 function stopActiveAudio(): void {
   for (const handle of activeAudioHandles) handle.stop();
   activeAudioHandles = [];
+}
+
+/**
+ * Programa TODA la reproducción de audio de la timeline desde
+ * `fromTicks` en adelante, de una sola vez, usando allAudioSchedules
+ * (core/timeline.ts) — la misma función pura que usa la exportación,
+ * así preview y export no pueden divergir en qué suena. A diferencia
+ * del vídeo (que avanza de segmento en segmento con VideoPlayer real y
+ * eventos), el audio no necesita "avanzar": cada AudioBufferSourceNode
+ * se programa ya con su instante de inicio futuro
+ * (AudioBufferSourceNode.start(when)), así que basta con llamar a esto
+ * una vez al arrancar cada sesión de reproducción (ver
+ * playFromPlayhead) — nunca en cada transición interna de segmento.
+ */
+function scheduleAllTrackAudio(fromTicks: number): void {
+  if (!timeline) return;
+  const baseWhen = audioContext.currentTime;
+  for (const schedule of allAudioSchedules(timeline, fromTicks)) {
+    const entry = sources.get(schedule.sourceId);
+    if (!entry?.audio) continue;
+    const when = baseWhen + ticksToSeconds(schedule.startTicks - fromTicks);
+    activeAudioHandles.push(
+      playAudioSlice(
+        audioContext,
+        entry.audio,
+        ticksToSeconds(schedule.sourceStartTicks),
+        ticksToSeconds(schedule.durationTicks),
+        when,
+        schedule.automation,
+      ),
+    );
+  }
 }
 
 // Reproducción "sintética" (huecos y transiciones): no hay VideoPlayer
@@ -345,6 +390,7 @@ function afterHistoryChange(): void {
     trimInInput.value = String(ticksToSeconds(found.clip.sourceInTicks));
     trimOutInput.value = String(ticksToSeconds(found.clip.sourceOutTicks));
     clipMutedInput.checked = found.clip.muted;
+    clipVideoHiddenInput.checked = found.clip.videoHidden ?? false;
     clipColorFilterSelect.value = found.clip.colorFilter ?? "";
   }
   void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
@@ -487,9 +533,6 @@ function playFromTimelineTicks(startTicks: number): Promise<void> {
 }
 
 async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): Promise<void> {
-  const tl = requireTimeline();
-  const track = tl.tracks.find((t) => t.id === trackId);
-  if (!track) return;
   const player = getPlayer(clip.sourceId);
   const startSeconds = ticksToSeconds(clip.sourceInTicks + offsetTicks);
   const startUs = Math.round(startSeconds * 1_000_000);
@@ -497,31 +540,11 @@ async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): P
   activeSegment = { kind: "clip", trackId, clip };
   activeColorFilter = clip.colorFilter;
 
-  stopActiveAudio();
-
-  // Se busca el vídeo ANTES de arrancar el audio: seekTo() decodifica
-  // de forma asíncrona (unos ms), y Web Audio empieza a sonar de forma
-  // prácticamente inmediata en cuanto se programa — si el audio
-  // arrancara antes, iría por delante del primer fotograma visible.
+  // El audio de TODA la timeline (esta pista y el resto) ya quedó
+  // programado de una vez al arrancar la sesión de reproducción — ver
+  // scheduleAllTrackAudio/playFromPlayhead. Aquí solo hace falta
+  // encontrar el vídeo.
   await player.seekTo(startUs);
-
-  const entry = sources.get(clip.sourceId);
-  if (entry?.audio && !clip.muted) {
-    if (audioContext.state === "suspended") await audioContext.resume();
-    // Si hay una transición pegada a un lado, esa franja de audio ya
-    // es cosa suya (fundido cruzado, ver playTransitionFrom) — este
-    // clip no la vuelve a reproducir por su cuenta.
-    const audioStartOffsetTicks = Math.max(offsetTicks, audioHeadCutTicks(track, clip));
-    const playEndTicks = clipDurationTicks(clip) - audioTailCutTicks(track, clip);
-    if (playEndTicks > audioStartOffsetTicks) {
-      const audioStartSeconds = ticksToSeconds(clip.sourceInTicks + audioStartOffsetTicks);
-      const durationSeconds = ticksToSeconds(playEndTicks - audioStartOffsetTicks);
-      const automation = volumeAutomationFrom(clip, audioStartOffsetTicks);
-      activeAudioHandles.push(
-        playAudioSlice(audioContext, entry.audio, audioStartSeconds, durationSeconds, audioContext.currentTime, automation),
-      );
-    }
-  }
 
   player.play(endUs);
   pauseButton.disabled = false;
@@ -541,7 +564,6 @@ function playSyntheticSegment(
   render: (ticks: number) => void,
   cleanup?: () => void,
 ): void {
-  stopActiveAudio();
   pauseButton.disabled = false;
   syntheticCleanup = cleanup;
 
@@ -589,38 +611,21 @@ async function playTransitionFrom(trackId: string, clip: Clip, offsetTicks: numb
   const track = tl.tracks.find((t) => t.id === trackId);
   if (!track) return;
   activeSegment = { kind: "transition", trackId, clip };
-  stopActiveAudio();
 
   const frames = await transitionFramesFor(tl, track, clip);
   if (activeSegment.kind !== "transition" || activeSegment.clip.id !== clip.id) return; // el usuario ya saltó a otro sitio mientras decodificábamos
 
+  // El fundido cruzado del audio del clip saliente/entrante (nunca
+  // silencio) ya quedó programado con el resto de la timeline al
+  // arrancar la sesión de reproducción — ver
+  // scheduleAllTrackAudio/playFromPlayhead — así que aquí solo hace
+  // falta dibujar los fotogramas fijos.
   const durationTicks = clipDurationTicks(clip);
   playSyntheticSegment(clip.startTicks, clipEndTicks(clip), offsetTicks, (ticks) => {
     const progress = durationTicks > 0 ? (ticks - clip.startTicks) / durationTicks : 0;
     drawTransitionFrame(ctx, canvas.width, canvas.height, clip.transitionType ?? "crossfade", frames, progress);
     drawActiveTextOverlays(ticks);
   });
-
-  // Fundido cruzado del audio del clip saliente/entrante durante la
-  // transición — nunca silencio. transitionAudioCues es la misma
-  // función pura de /core que usa export/exportTimeline.ts, así
-  // preview y export no pueden divergir en qué suena aquí.
-  if (audioContext.state === "suspended") await audioContext.resume();
-  if (activeSegment.kind !== "transition" || activeSegment.clip.id !== clip.id) return; // el usuario ya saltó a otro sitio mientras se reanudaba el audio
-  for (const cue of transitionAudioCues(track, clip, offsetTicks)) {
-    const neighborAudio = sources.get(cue.sourceId)?.audio;
-    if (!neighborAudio) continue;
-    activeAudioHandles.push(
-      playAudioSlice(
-        audioContext,
-        neighborAudio,
-        ticksToSeconds(cue.sourceStartTicks),
-        ticksToSeconds(cue.durationTicks),
-        audioContext.currentTime,
-        cue.automation,
-      ),
-    );
-  }
 }
 
 function stopPlayback(): void {
@@ -631,16 +636,26 @@ function stopPlayback(): void {
   pauseButton.disabled = true;
 }
 
-/** Reproduce desde el playhead actual hasta el final del clip/hueco/transición que ocupa esa posición. */
-function playFromPlayhead(): void {
+/**
+ * Arranca una sesión de reproducción entera desde el playhead actual:
+ * programa de una vez TODO el audio de la timeline desde ahí en
+ * adelante (scheduleAllTrackAudio — una sola vez por sesión, nunca en
+ * cada transición interna de clip/hueco/transición, ver su doc) y
+ * luego reparte el vídeo al primer segmento (playFromTimelineTicks,
+ * que sí se vuelve a llamar internamente conforme avanza — ver
+ * advanceFrom).
+ */
+async function playFromPlayhead(): Promise<void> {
   if (!timeline) return;
-  void playFromTimelineTicks(playheadTicks);
+  if (audioContext.state === "suspended") await audioContext.resume();
+  scheduleAllTrackAudio(playheadTicks);
+  await playFromTimelineTicks(playheadTicks);
 }
 
 function togglePlayPause(): void {
   if (!timeline) return;
   if (activeSegment) stopPlayback();
-  else playFromPlayhead();
+  else void playFromPlayhead();
 }
 
 async function seekToTimelineTicks(ticks: number): Promise<void> {
@@ -781,8 +796,34 @@ function throttleToFrame(fn: () => void): () => void {
 }
 
 const scheduleTimelineLayoutRefresh = throttleToFrame(refreshTimelineLayout);
-const scheduleTracksRender = throttleToFrame(renderTimelineTracks);
 const scheduleTextTrackRender = throttleToFrame(renderTextTrack);
+
+/**
+ * Actualiza SOLO la posición/anchura en pantalla de los elementos ya
+ * existentes de un clip (su bloque de vídeo y, si tiene, la celda de
+ * audio pareja de su misma pista — ambos llevan `data-clip-id`, ver
+ * renderVideoLaneClips/renderAudioLaneClips) en vez de reconstruir
+ * toda la timeline. Usadas mientras un arrastre de MOVER/REDIMENSIONAR
+ * TRANSICIÓN está en curso — esas operaciones nunca cambian el
+ * contenido visual de un clip (miniatura, forma de onda), solo dónde
+ * o cuánto ocupa, así que no hace falta la reconstrucción cara de
+ * refreshTimelineLayout (todas las pistas, todas las formas de onda)
+ * en cada fotograma — esa sí se sigue haciendo una vez al soltar (ver
+ * selectClipRef en los `onUp` de los arrastres que las usan).
+ */
+function syncClipLeftInDom(clipId: string, startTicks: number): void {
+  const leftPx = Math.round(ticksToSeconds(startTicks) * pixelsPerSecond);
+  for (const node of timelineTracksContainer.querySelectorAll<HTMLElement>(`[data-clip-id="${clipId}"]`)) {
+    node.style.left = `${leftPx}px`;
+  }
+}
+
+function syncClipWidthInDom(clipId: string, durationTicks: number): void {
+  const widthPx = Math.max(1, ticksToSeconds(durationTicks) * pixelsPerSecond);
+  for (const node of timelineTracksContainer.querySelectorAll<HTMLElement>(`[data-clip-id="${clipId}"]`)) {
+    node.style.width = `${widthPx}px`;
+  }
+}
 
 function zoomAt(newPixelsPerSecond: number, anchorClientX: number): void {
   if (!timeline) return;
@@ -991,9 +1032,9 @@ function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string)
     }
 
     timeline = moveClipTo(dragStartTimeline, trackId, clipId, newStart);
-    scheduleTimelineLayoutRefresh();
     const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
     if (updated) {
+      syncClipLeftInDom(clipId, updated.startTicks);
       showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, formatRulerTime(ticksToSeconds(updated.startTicks)));
     }
   }
@@ -1051,7 +1092,8 @@ function beginTransitionResizeDrag(event: PointerEvent, trackId: string, clipId:
     const deltaTicks = secondsToTicks(dx / pixelsPerSecond);
     const appliedValue = Math.max(minDuration, originalClip.sourceOutTicks + deltaTicks);
     timeline = trimClipOut(dragStartTimeline, trackId, clipId, appliedValue, minDuration);
-    scheduleTimelineLayoutRefresh();
+    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    if (updated) syncClipWidthInDom(clipId, clipDurationTicks(updated));
     showFloatingTooltip(
       moveEvent.clientX,
       moveEvent.clientY,
@@ -1260,7 +1302,11 @@ function renderVideoLaneClips(track: Track, lane: HTMLElement): void {
 
     const block = document.createElement("div");
     block.className =
-      "timeline-clip" + (isSelected ? " selected" : "") + (clip.kind === "transition" ? " timeline-clip--transition" : "");
+      "timeline-clip" +
+      (isSelected ? " selected" : "") +
+      (clip.kind === "transition" ? " timeline-clip--transition" : "") +
+      (clip.kind === "clip" && clip.videoHidden ? " timeline-clip--video-hidden" : "");
+    block.dataset.clipId = clip.id;
     block.style.left = `${Math.round(ticksToSeconds(clip.startTicks) * pixelsPerSecond)}px`;
     block.style.width = `${Math.max(1, ticksToSeconds(durationTicks) * pixelsPerSecond)}px`;
     if (entry?.thumbnail) block.style.backgroundImage = `url(${entry.thumbnail})`;
@@ -1350,12 +1396,11 @@ function beginVolumeDrag(event: PointerEvent, trackId: string, clipId: string, c
   const clip = dragStartTimeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
   if (!clip) return;
   const wasMuted = clip.muted;
-  // Se captura el rect UNA vez: renderTimelineTracks() reconstruye el DOM
-  // en cada apply() (para redibujar la línea de volumen), lo que deja
-  // `cell` desconectado del árbol — su getBoundingClientRect() después
-  // de eso devolvería siempre 0. La celda no se mueve verticalmente
-  // durante el arrastre, así que un único rect capturado al empezar
-  // sigue siendo válido durante todo el gesto.
+  // La celda no se mueve verticalmente durante el arrastre (apply() ya
+  // no reconstruye nada, solo repinta su propia polilínea — ver
+  // repaintVolumeVisuals — así que sigue siendo el mismo nodo todo el
+  // gesto), así que un único rect capturado al empezar sigue siendo
+  // válido durante todo el gesto.
   const cellRect = cell.getBoundingClientRect();
 
   function volumeFromClientY(clientY: number): number {
@@ -1367,7 +1412,8 @@ function beginVolumeDrag(event: PointerEvent, trackId: string, clipId: string, c
     if (!timeline) return;
     const volume = volumeFromClientY(clientY);
     timeline = setClipAudio(timeline, trackId, clipId, volume, wasMuted);
-    scheduleTracksRender();
+    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    if (updated) repaintVolumeVisuals(cell, trackId, updated);
     showFloatingTooltip(clientX, clientY, `Volumen: ${Math.round(volume * 100)}%`);
   }
 
@@ -1419,7 +1465,8 @@ function beginVolumeKeyframeCreateDrag(event: PointerEvent, trackId: string, cli
     const offsetTicks = Math.round(((clientX - cellRect.left) / cellRect.width) * clipDuration);
     const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect.top) / cellRect.height));
     timeline = addVolumeKeyframe(dragStartTimeline, trackId, clipId, offsetTicks, volume);
-    scheduleTracksRender();
+    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    if (updated) repaintVolumeVisuals(cell, trackId, updated);
     showFloatingTooltip(clientX, clientY, `${Math.round(volume * 100)}%`);
   }
 
@@ -1474,7 +1521,8 @@ function beginVolumeKeyframeDrag(
     const offsetTicks = Math.round(((clientX - cellRect.left) / cellRect.width) * clipDuration);
     const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect.top) / cellRect.height));
     timeline = moveVolumeKeyframe(dragStartTimeline, trackId, clipId, keyframeIndex, offsetTicks, volume);
-    scheduleTracksRender();
+    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    if (updated) repaintVolumeVisuals(cell, trackId, updated);
     showFloatingTooltip(clientX, clientY, `${Math.round(volume * 100)}%`);
   }
 
@@ -1513,6 +1561,79 @@ function beginVolumeKeyframeDrag(
  * arrastrable por separado (beginVolumeKeyframeDrag), y Alt+clic sobre
  * un punto lo quita.
  */
+
+/**
+ * (Re)pinta SOLO la polilínea/puntos de volumen de la celda de audio
+ * de un clip — la forma de onda (canvas) no depende del volumen, así
+ * que no hace falta tocarla. Se usa tanto en el render inicial de la
+ * celda (renderAudioLaneClips) como, síncrona y directamente (sin
+ * pasar por refreshTimelineLayout), en cada punto de un arrastre de
+ * volumen en curso (beginVolumeDrag/beginVolumeKeyframeCreateDrag/
+ * beginVolumeKeyframeDrag) — mucho más barato que reconstruir toda la
+ * timeline en cada fotograma solo para mover una polilínea. No
+ * reengancha el propio `pointerdown` de `cell` (eso se hace una única
+ * vez al crearla, leyendo el clip actual en cada evento — ver
+ * renderAudioLaneClips).
+ */
+function repaintVolumeVisuals(cell: HTMLElement, trackId: string, clip: Clip): void {
+  const clipDuration = clipDurationTicks(clip) || 1;
+  const keyframes = clip.volumeKeyframes ?? [];
+  const linePoints =
+    keyframes.length > 0
+      ? keyframes.map((k) => ({ x: (k.offsetTicks / clipDuration) * 100, y: (1 - k.volume) * 100 }))
+      : [
+          { x: 0, y: (1 - clip.volume) * 100 },
+          { x: 100, y: (1 - clip.volume) * 100 },
+        ];
+
+  cell.querySelector(".volume-svg")?.remove();
+  cell.querySelectorAll(".volume-point").forEach((el) => el.remove());
+  cell.querySelector(".volume-label")?.remove();
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.classList.add("volume-svg");
+  const polyline = document.createElementNS(SVG_NS, "polyline");
+  polyline.setAttribute("points", linePoints.map((p) => `${p.x},${p.y}`).join(" "));
+  svg.appendChild(polyline);
+  cell.appendChild(svg);
+
+  keyframes.forEach((keyframe, keyframeIndex) => {
+    const point = document.createElement("div");
+    point.className = "volume-point";
+    point.style.left = `${(keyframe.offsetTicks / clipDuration) * 100}%`;
+    point.style.top = `${(1 - keyframe.volume) * 100}%`;
+    point.title = `${Math.round(keyframe.volume * 100)}% — Alt+clic para quitar`;
+    point.addEventListener("pointerdown", (event) => {
+      if (event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!timeline) return;
+        commitTimeline(removeVolumeKeyframe(timeline, trackId, clip.id, keyframeIndex));
+        refreshTimelineLayout();
+        status.textContent = "Punto de volumen eliminado.";
+        return;
+      }
+      beginVolumeKeyframeDrag(event, trackId, clip.id, keyframeIndex, cell);
+    });
+    cell.appendChild(point);
+  });
+
+  cell.classList.toggle("muted", clip.muted);
+  if (keyframes.length === 0) {
+    const volumeLabel = document.createElement("span");
+    volumeLabel.className = "volume-label";
+    volumeLabel.textContent = clip.muted ? "silenciado" : `${Math.round(clip.volume * 100)}%`;
+    cell.appendChild(volumeLabel);
+  }
+
+  cell.title =
+    keyframes.length > 0
+      ? "Arrastra un punto para moverlo · Alt+clic para añadir/quitar puntos"
+      : "Arrastra arriba/abajo para el volumen del clip · Alt+clic para subirlo/bajarlo por trozos";
+}
+
 function renderAudioLaneClips(track: Track, lane: HTMLElement): void {
   lane.innerHTML = "";
 
@@ -1524,6 +1645,7 @@ function renderAudioLaneClips(track: Track, lane: HTMLElement): void {
 
     const cell = document.createElement("div");
     cell.className = "timeline-audio-cell";
+    cell.dataset.clipId = clip.id;
     cell.style.left = `${Math.round(ticksToSeconds(clip.startTicks) * pixelsPerSecond)}px`;
     cell.style.width = `${widthPx}px`;
 
@@ -1550,68 +1672,36 @@ function renderAudioLaneClips(track: Track, lane: HTMLElement): void {
       }
       cell.appendChild(cellCanvas);
 
-      cell.classList.add("has-volume");
-      if (clip.muted) cell.classList.add("muted");
-
-      const keyframes = clip.volumeKeyframes ?? [];
-      const clipDuration = durationTicks || 1;
-      const linePoints =
-        keyframes.length > 0
-          ? keyframes.map((k) => ({ x: (k.offsetTicks / clipDuration) * 100, y: (1 - k.volume) * 100 }))
-          : [
-              { x: 0, y: (1 - clip.volume) * 100 },
-              { x: 100, y: (1 - clip.volume) * 100 },
-            ];
-
-      const svg = document.createElementNS(SVG_NS, "svg");
-      svg.setAttribute("viewBox", "0 0 100 100");
-      svg.setAttribute("preserveAspectRatio", "none");
-      svg.classList.add("volume-svg");
-      const polyline = document.createElementNS(SVG_NS, "polyline");
-      polyline.setAttribute("points", linePoints.map((p) => `${p.x},${p.y}`).join(" "));
-      svg.appendChild(polyline);
-      cell.appendChild(svg);
-
-      keyframes.forEach((keyframe, keyframeIndex) => {
-        const point = document.createElement("div");
-        point.className = "volume-point";
-        point.style.left = `${(keyframe.offsetTicks / clipDuration) * 100}%`;
-        point.style.top = `${(1 - keyframe.volume) * 100}%`;
-        point.title = `${Math.round(keyframe.volume * 100)}% — Alt+clic para quitar`;
-        point.addEventListener("pointerdown", (event) => {
-          if (event.altKey) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!timeline) return;
-            commitTimeline(removeVolumeKeyframe(timeline, track.id, clip.id, keyframeIndex));
-            refreshTimelineLayout();
-            status.textContent = "Punto de volumen eliminado.";
-            return;
-          }
-          beginVolumeKeyframeDrag(event, track.id, clip.id, keyframeIndex, cell);
-        });
-        cell.appendChild(point);
+      const removeAudioBtn = document.createElement("button");
+      removeAudioBtn.className = "audio-remove";
+      removeAudioBtn.type = "button";
+      removeAudioBtn.textContent = "×";
+      removeAudioBtn.title = "Eliminar audio del clip (deja solo vídeo)";
+      removeAudioBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        removeClipAudio(track.id, clip.id);
       });
+      cell.appendChild(removeAudioBtn);
 
-      if (keyframes.length === 0) {
-        const volumeLabel = document.createElement("span");
-        volumeLabel.className = "volume-label";
-        volumeLabel.textContent = clip.muted ? "silenciado" : `${Math.round(clip.volume * 100)}%`;
-        cell.appendChild(volumeLabel);
-      }
+      cell.classList.add("has-volume");
+      repaintVolumeVisuals(cell, track.id, clip);
 
-      cell.title =
-        keyframes.length > 0
-          ? "Arrastra un punto para moverlo · Alt+clic para añadir/quitar puntos"
-          : "Arrastra arriba/abajo para el volumen del clip · Alt+clic para subirlo/bajarlo por trozos";
+      // Lee el clip ACTUAL de `timeline` en vez de cerrar sobre el
+      // `clip`/keyframes de este render: este listener se queda
+      // pegado a la celda durante arrastres sucesivos (repaintVolumeVisuals
+      // no la reconstruye, solo repinta polilínea/puntos — ver su doc),
+      // así que "¿ya tiene puntos de volumen?" tiene que responderse en
+      // el momento del click, no con el estado de cuando se creó la celda.
       cell.addEventListener("pointerdown", (event) => {
         const targetEl = event.target as HTMLElement;
         if (targetEl.closest(".volume-point")) return; // gestionado por el propio punto
+        const currentClip = timeline?.tracks.find((t) => t.id === track.id)?.clips.find((c) => c.id === clip.id);
+        if (!currentClip) return;
         if (event.altKey) {
-          beginVolumeKeyframeCreateDrag(event, track.id, clip.id, cell);
+          beginVolumeKeyframeCreateDrag(event, track.id, currentClip.id, cell);
           return;
         }
-        if (keyframes.length === 0) beginVolumeDrag(event, track.id, clip.id, cell);
+        if ((currentClip.volumeKeyframes ?? []).length === 0) beginVolumeDrag(event, track.id, currentClip.id, cell);
       });
     } else {
       cell.classList.add("no-audio");
@@ -1870,6 +1960,7 @@ function selectClipRef(trackId: string, clipId: string): void {
   trimInInput.value = String(ticksToSeconds(clip.sourceInTicks));
   trimOutInput.value = String(ticksToSeconds(clip.sourceOutTicks));
   clipMutedInput.checked = clip.muted;
+  clipVideoHiddenInput.checked = clip.videoHidden ?? false;
   clipColorFilterSelect.value = clip.colorFilter ?? "";
   trimDetails.open = true; // al seleccionar un clip, se abre solo el compartimento donde se edita
   renderTimelineTracks();
@@ -1884,6 +1975,17 @@ function removeClipRef(trackId: string, clipId: string): void {
   }
   refreshTimelineLayout();
   void seekToTimelineTicks(playheadTicks);
+}
+
+/** Botón × de la celda de audio — "quita" solo el audio del clip (lo silencia, ver setClipAudio), a diferencia de removeClipRef que quita el clip entero. */
+function removeClipAudio(trackId: string, clipId: string): void {
+  if (!timeline) return;
+  const clip = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+  if (!clip) return;
+  commitTimeline(setClipAudio(timeline, trackId, clipId, clip.volume, true));
+  refreshTimelineLayout();
+  if (selectedClip?.trackId === trackId && selectedClip.clipId === clipId) clipMutedInput.checked = true;
+  status.textContent = "Audio del clip eliminado (silenciado).";
 }
 
 function enableEditingControls(): void {
@@ -1918,6 +2020,24 @@ function selectClipAtPlayhead(): void {
 }
 
 selectClipButton.addEventListener("click", selectClipAtPlayhead);
+
+/**
+ * Ruta absoluta real de `file`, si estamos dentro de Electron (ver
+ * ui/electronBridge.ts) Y `file` viene de un selector/arrastre real del
+ * SO — getPathForFile no funciona sobre un File sintético como los que
+ * crea readFileFromPath al releer por ruta, así que solo se llama con
+ * archivos recién elegidos por el usuario (nunca con uno ya reconstruido
+ * desde un `filePath` guardado). undefined en cualquier otro caso,
+ * incluida cualquier excepción de la API de Electron.
+ */
+function getFilePathIfAvailable(file: File): string | undefined {
+  try {
+    return getAppVideoBridge()?.getPathForFile(file);
+  } catch (error) {
+    console.warn("No se pudo obtener la ruta absoluta del archivo:", error);
+    return undefined;
+  }
+}
 
 /** Decodifica el audio de un archivo (si tiene) y precalcula los picos de su forma de onda. undefined en ambos si no hay audio decodificable. */
 async function loadAudioForSource(
@@ -1959,10 +2079,12 @@ async function addClipFromFile(file: File): Promise<void> {
       return undefined;
     });
     const { audio, waveformPeaks } = await loadAudioForSource(file);
+    const filePath = getFilePathIfAvailable(file);
     sources.set(sourceId, {
       sourceFile,
       demuxed,
       fileName: file.name,
+      ...(filePath ? { filePath } : {}),
       ...(thumbnail ? { thumbnail } : {}),
       ...(audio ? { audio } : {}),
       ...(waveformPeaks ? { waveformPeaks } : {}),
@@ -2067,6 +2189,19 @@ function applyClipMuted(): void {
 }
 
 clipMutedInput.addEventListener("change", applyClipMuted);
+
+/** Opuesto de applyClipMuted, pero para el vídeo — ver doc de Clip.videoHidden en core/types.ts. */
+function applyClipVideoHidden(): void {
+  const found = findClipRef(selectedClip);
+  if (!timeline || !found) return;
+  const videoHidden = clipVideoHiddenInput.checked;
+  commitTimeline(setClipVideoHidden(timeline, found.track.id, found.clip.id, videoHidden));
+  refreshTimelineLayout();
+  void seekToTimelineTicks(playheadTicks); // repinta el preview YA (puede pasar a verse la pista de abajo, o negro)
+  status.textContent = videoHidden ? "Vídeo ocultado (solo audio)." : "Vídeo visible de nuevo.";
+}
+
+clipVideoHiddenInput.addEventListener("change", applyClipVideoHidden);
 
 function applyClipColorFilter(): void {
   const found = findClipRef(selectedClip);
@@ -2841,6 +2976,7 @@ function collectProjectSources(): ProjectSource[] {
     ...entry.sourceFile,
     id,
     fileName: entry.fileName,
+    ...(entry.filePath ? { filePath: entry.filePath } : {}),
   }));
 }
 
@@ -2858,6 +2994,8 @@ saveProjectButton.addEventListener("click", () => {
 });
 
 let pendingProject: ProjectFile | undefined;
+/** Fuentes ya releídas por ruta (sin intervención del usuario) para el `pendingProject` actual — ver handleProjectFileSelected. Vacío si no hay puente de Electron o ninguna fuente tenía `filePath`. */
+let pendingAutoResolvedSources: Map<string, File> = new Map();
 
 loadProjectButton.addEventListener("click", () => projectFileInput.click());
 
@@ -2868,12 +3006,37 @@ projectFileInput.addEventListener("change", () => {
   void handleProjectFileSelected(file);
 });
 
+/** Intenta releer cada fuente con `filePath` guardado directamente por ruta (Electron, ver ui/electronBridge.ts) — sin molestar al usuario. Las que no tengan ruta, no existan ya ahí, o fallen al leerse, quedan fuera del resultado. */
+async function autoResolveProjectSources(sources: ProjectSource[]): Promise<Map<string, File>> {
+  const resolved = new Map<string, File>();
+  const bridge = getAppVideoBridge();
+  if (!bridge) return resolved;
+  for (const source of sources) {
+    if (!source.filePath) continue;
+    try {
+      if (await bridge.fileExists(source.filePath)) {
+        resolved.set(source.id, await readFileFromPath(bridge, source.filePath, source.fileName));
+      }
+    } catch (error) {
+      console.warn(`No se pudo releer ${source.fileName} por ruta guardada:`, error);
+    }
+  }
+  return resolved;
+}
+
 async function handleProjectFileSelected(file: File): Promise<void> {
   try {
     const text = await file.text();
     const parsed = parseProjectFile(JSON.parse(text));
     pendingProject = parsed;
-    const names = parsed.sources.map((source) => source.fileName).join(", ");
+    pendingAutoResolvedSources = await autoResolveProjectSources(parsed.sources);
+
+    const missing = parsed.sources.filter((source) => !pendingAutoResolvedSources.has(source.id));
+    if (missing.length === 0) {
+      await applyPendingProject(parsed, []);
+      return;
+    }
+    const names = missing.map((source) => source.fileName).join(", ");
     projectStatus.textContent = `Proyecto leído. Vuelve a seleccionar estos archivos (mismo nombre): ${names}`;
     projectSourcesInput.click();
   } catch (error) {
@@ -2889,9 +3052,17 @@ projectSourcesInput.addEventListener("change", () => {
   void applyPendingProject(pendingProject, files);
 });
 
-async function applyPendingProject(project: ProjectFile, files: File[]): Promise<void> {
-  const byName = new Map(files.map((file) => [file.name, file]));
-  const missing = project.sources.filter((source) => !byName.has(source.fileName));
+/** `manualFiles` son solo los que el usuario acaba de re-seleccionar a mano (emparejados por nombre); los que ya se resolvieron por ruta guardada están en `pendingAutoResolvedSources` (ver handleProjectFileSelected) y se fusionan aquí por sourceId. */
+async function applyPendingProject(project: ProjectFile, manualFiles: File[]): Promise<void> {
+  const manualByName = new Map(manualFiles.map((file) => [file.name, file]));
+  const byId = new Map(pendingAutoResolvedSources);
+  const missing: ProjectSource[] = [];
+  for (const source of project.sources) {
+    if (byId.has(source.id)) continue;
+    const manual = manualByName.get(source.fileName);
+    if (manual) byId.set(source.id, manual);
+    else missing.push(source);
+  }
   if (missing.length > 0) {
     projectStatus.textContent = `Faltan archivos: ${missing.map((s) => s.fileName).join(", ")}. Selecciónalos todos a la vez.`;
     return;
@@ -2902,7 +3073,7 @@ async function applyPendingProject(project: ProjectFile, files: File[]): Promise
   const newSources = new Map<string, SourceEntry>();
   try {
     for (const projectSource of project.sources) {
-      const file = byName.get(projectSource.fileName)!;
+      const file = byId.get(projectSource.id)!;
       const { videoTrack, samples } = await decodeAllSamples(file);
       const firstSample = samples[0];
       if (!firstSample) {
@@ -2915,6 +3086,13 @@ async function applyPendingProject(project: ProjectFile, files: File[]): Promise
         return undefined;
       });
       const { audio, waveformPeaks } = await loadAudioForSource(file);
+      // Si ya sabíamos la ruta (por el proyecto guardado o por acabar de
+      // releerlo por ruta), se conserva tal cual — getFilePathIfAvailable
+      // no funcionaría sobre el File sintético que devuelve
+      // readFileFromPath. Solo se intenta capturar una ruta NUEVA para
+      // archivos re-seleccionados a mano (File real de un <input>), así
+      // la próxima recarga también los resuelve solos.
+      const filePath = projectSource.filePath ?? getFilePathIfAvailable(file);
       newSources.set(projectSource.id, {
         sourceFile: {
           id: projectSource.id,
@@ -2926,6 +3104,7 @@ async function applyPendingProject(project: ProjectFile, files: File[]): Promise
         },
         demuxed,
         fileName: projectSource.fileName,
+        ...(filePath ? { filePath } : {}),
         ...(thumbnail ? { thumbnail } : {}),
         ...(audio ? { audio } : {}),
         ...(waveformPeaks ? { waveformPeaks } : {}),

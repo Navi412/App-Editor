@@ -13,6 +13,16 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // El preload SÍ necesita Node real (fs, para leer archivos de
+      // proyecto por ruta — ver electron/preload.cjs) y el sandbox de
+      // preload (activado por defecto desde Electron 20) se lo bloquea:
+      // ahí dentro ni siquiera `require("fs")` está disponible. Desactivar
+      // el sandbox NO reactiva nodeIntegration en la página — la propia
+      // renderer sigue sin poder hacer require() de nada, solo el script
+      // de preload (que ya decide qué expone vía contextBridge) gana
+      // Node completo.
+      sandbox: false,
+      preload: path.join(__dirname, "preload.cjs"),
     },
   });
 

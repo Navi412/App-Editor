@@ -89,6 +89,11 @@ export function resolveActiveVideoPosition(timeline: Timeline, timelineTicks: nu
     const clipIndex = track.clips.findIndex((c) => timelineTicks >= c.startTicks && timelineTicks < clipEndTicks(c));
     if (clipIndex === -1) continue;
     const clip = track.clips[clipIndex]!;
+    // videoHidden: el clip sigue ahí (su audio suena igual, ver
+    // allAudioSchedules, que nunca consulta este campo) pero no
+    // participa en la composición de vídeo — como si esta pista no
+    // tuviera contenido en este instante, se sigue mirando hacia abajo.
+    if (clip.videoHidden) continue;
     return {
       clip,
       clipIndex,
@@ -112,6 +117,8 @@ export function nextVideoContentTicks(timeline: Timeline, afterTicks: number): n
   for (const track of timeline.tracks) {
     if (track.kind !== "video" || track.hidden) continue;
     for (const clip of track.clips) {
+      // videoHidden nunca aporta contenido de vídeo — ver resolveActiveVideoPosition.
+      if (clip.videoHidden) continue;
       if (clip.startTicks > afterTicks && (best === null || clip.startTicks < best)) {
         best = clip.startTicks;
       }
@@ -356,6 +363,22 @@ export function setClipAudio(
     const clampedVolume = Math.max(0, Math.min(1, volume));
     const clips = [...track.clips];
     clips[index] = { ...clip, volume: clampedVolume, muted };
+    return { ...track, clips };
+  });
+}
+
+/** Oculta (o vuelve a mostrar, con false) el vídeo de un clip sin tocar su audio — ver doc de Clip.videoHidden. */
+export function setClipVideoHidden(timeline: Timeline, trackId: string, clipId: string, videoHidden: boolean): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const clips = [...track.clips];
+    if (videoHidden) {
+      clips[index] = { ...clip, videoHidden: true };
+    } else {
+      const { videoHidden: _removed, ...rest } = clip;
+      clips[index] = rest;
+    }
     return { ...track, clips };
   });
 }
@@ -618,4 +641,69 @@ export function transitionAudioCues(
   }
 
   return cues;
+}
+
+/** Una franja de audio que hay que reproducir/exportar: qué fuente, qué rango de ELLA, en qué instante ABSOLUTO de la timeline empieza (`startTicks`), y su rampa de volumen ya lista (offsets relativos al inicio de ESTA franja, no del clip). */
+export interface AudioSchedule {
+  sourceId: string;
+  sourceStartTicks: number;
+  durationTicks: number;
+  startTicks: number;
+  automation: VolumeAutomationPoint[];
+}
+
+/**
+ * Todas las franjas de audio que suenan en la timeline completa desde
+ * `fromTicks` en adelante (0, siempre, para exportación; el instante
+ * del playhead para retomar la reproducción en vivo a mitad — ver
+ * ui/main.ts). Recorre TODAS las pistas no ocultas (el audio pegado a
+ * los clips de las pistas de vídeo Y los clips propios de las pistas
+ * de audio, ver CLAUDE.md — a diferencia del vídeo, el audio no tiene
+ * concepto de "capas que se tapan") y junta tanto el audio normal de
+ * cada clip (recortado si hay una transición pegada a un lado, ver
+ * audioHeadCutTicks/audioTailCutTicks) como los cues de fundido
+ * cruzado de cada transición (transitionAudioCues).
+ *
+ * Única función que sabe construir esta lista completa: reproducción
+ * en directo (ui/main.ts) y exportación (export/exportTimeline.ts) la
+ * comparten para que preview y export nunca puedan divergir en qué
+ * suena.
+ */
+export function allAudioSchedules(timeline: Timeline, fromTicks: number = 0): AudioSchedule[] {
+  const schedules: AudioSchedule[] = [];
+  for (const track of timeline.tracks) {
+    if (track.hidden) continue;
+    for (const clip of track.clips) {
+      if (clip.kind === "clip") {
+        if (clip.muted) continue;
+        const headCutTicks = audioHeadCutTicks(track, clip);
+        const playDurationTicks = clipDurationTicks(clip) - headCutTicks - audioTailCutTicks(track, clip);
+        if (playDurationTicks <= 0) continue;
+        const audioStartTicks = clip.startTicks + headCutTicks;
+        const audioEndTicks = audioStartTicks + playDurationTicks;
+        if (audioEndTicks <= fromTicks) continue;
+        const skipTicks = Math.max(0, fromTicks - audioStartTicks);
+        schedules.push({
+          sourceId: clip.sourceId,
+          sourceStartTicks: clip.sourceInTicks + headCutTicks + skipTicks,
+          durationTicks: playDurationTicks - skipTicks,
+          startTicks: audioStartTicks + skipTicks,
+          automation: volumeAutomationFrom(clip, headCutTicks + skipTicks),
+        });
+      } else if (clip.kind === "transition") {
+        if (clipEndTicks(clip) <= fromTicks) continue;
+        const startOffsetTicks = Math.max(0, fromTicks - clip.startTicks);
+        for (const cue of transitionAudioCues(track, clip, startOffsetTicks)) {
+          schedules.push({
+            sourceId: cue.sourceId,
+            sourceStartTicks: cue.sourceStartTicks,
+            durationTicks: cue.durationTicks,
+            startTicks: Math.max(clip.startTicks, fromTicks),
+            automation: cue.automation,
+          });
+        }
+      }
+    }
+  }
+  return schedules;
 }

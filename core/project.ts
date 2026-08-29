@@ -9,9 +9,17 @@ export interface Marker {
   label?: string;
 }
 
-/** Un SourceFile más el nombre de archivo original, para poder volver a emparejarlo al cargar el proyecto. */
+/**
+ * Un SourceFile más el nombre de archivo original, para poder volver a
+ * emparejarlo al cargar el proyecto. `filePath` (ruta absoluta, solo
+ * disponible dentro de la app de Electron — ver ui/electronBridge.ts) es
+ * opcional y solo sirve como atajo: si sigue existiendo ahí, /ui puede
+ * releerlo automáticamente sin pedirle nada al usuario; si no, cae al
+ * flujo de siempre (re-seleccionar a mano por `fileName`).
+ */
 export interface ProjectSource extends SourceFile {
   fileName: string;
+  filePath?: string;
 }
 
 /**
@@ -75,6 +83,7 @@ function isProjectSource(value: unknown): value is Omit<ProjectSource, "kind"> &
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   if (typeof v.id !== "string" || typeof v.fileName !== "string" || !isFiniteNumber(v.durationTicks)) return false;
+  if (v.filePath !== undefined && typeof v.filePath !== "string") return false;
   if (v.kind !== undefined && v.kind !== "video" && v.kind !== "audio") return false;
   const kind = (v.kind as "video" | "audio" | undefined) ?? "video";
   if (kind === "audio") return true;
@@ -111,12 +120,13 @@ interface RawClip {
   sourceOutTicks: number;
   volume?: number;
   muted?: boolean;
+  videoHidden?: boolean;
   transitionType?: string;
   volumeKeyframes?: VolumeKeyframe[];
   colorFilter?: string;
 }
 
-/** Acepta clips sin `volume`/`muted`/`kind`/`startTicks`/`transitionType`/`volumeKeyframes` (proyectos guardados antes de que existieran esos campos) — se normalizan en migrateClipsRipple. */
+/** Acepta clips sin `volume`/`muted`/`videoHidden`/`kind`/`startTicks`/`transitionType`/`volumeKeyframes` (proyectos guardados antes de que existieran esos campos) — se normalizan en migrateClipsRipple. */
 function isRawClip(value: unknown): value is RawClip {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -128,6 +138,7 @@ function isRawClip(value: unknown): value is RawClip {
     (v.startTicks === undefined || isFiniteNumber(v.startTicks)) &&
     (v.volume === undefined || isFiniteNumber(v.volume)) &&
     (v.muted === undefined || typeof v.muted === "boolean") &&
+    (v.videoHidden === undefined || typeof v.videoHidden === "boolean") &&
     (v.kind === undefined || (typeof v.kind === "string" && LEGACY_CLIP_KINDS.has(v.kind))) &&
     (v.transitionType === undefined ||
       (typeof v.transitionType === "string" && TRANSITION_TYPES.has(v.transitionType))) &&
@@ -167,6 +178,7 @@ function migrateClipsRipple(rawClips: RawClip[]): Clip[] {
         volume: raw.volume ?? 1,
         muted: raw.muted ?? false,
       };
+      if (raw.videoHidden) normalized.videoHidden = true;
       if (raw.transitionType) normalized.transitionType = raw.transitionType as NonNullable<Clip["transitionType"]>;
       if (raw.volumeKeyframes) normalized.volumeKeyframes = raw.volumeKeyframes;
       if (raw.colorFilter) normalized.colorFilter = raw.colorFilter as NonNullable<Clip["colorFilter"]>;

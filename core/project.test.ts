@@ -154,6 +154,43 @@ describe("serializeProject / parseProjectFile", () => {
     ]);
   });
 
+  it("conserva videoHidden en el round-trip, y omite clips guardados antes de que existiera (queda undefined)", () => {
+    const timeline: Timeline = {
+      tracks: [
+        {
+          id: "video-1",
+          kind: "video",
+          hidden: false,
+          clips: [
+            { id: "a", kind: "clip", sourceId: "source-1", startTicks: 0, sourceInTicks: 0, sourceOutTicks: 100, volume: 1, muted: false, videoHidden: true },
+            { id: "b", kind: "clip", sourceId: "source-1", startTicks: 100, sourceInTicks: 0, sourceOutTicks: 200, volume: 1, muted: false },
+          ],
+        },
+      ],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const serialized = serializeProject(timeline, sampleSources(), [], []);
+    const parsed = parseProjectFile(JSON.parse(JSON.stringify(serialized)));
+    expect(parsed.tracks[0]!.clips[0]!.videoHidden).toBe(true);
+    expect(parsed.tracks[0]!.clips[1]!.videoHidden).toBeUndefined();
+  });
+
+  it("conserva filePath en el round-trip cuando está presente", () => {
+    const timeline = sampleTimeline();
+    const sourcesWithPath = [{ ...sampleSources()[0]!, filePath: "C:\\videos\\clip.mp4" }];
+    const serialized = serializeProject(timeline, sourcesWithPath, [], []);
+    const parsed = parseProjectFile(JSON.parse(JSON.stringify(serialized)));
+    expect(parsed.sources[0]!.filePath).toBe("C:\\videos\\clip.mp4");
+  });
+
+  it("acepta fuentes guardadas antes de que existiera filePath (queda undefined)", () => {
+    const timeline = sampleTimeline();
+    const serialized = serializeProject(timeline, sampleSources(), [], []);
+    const parsed = parseProjectFile(JSON.parse(JSON.stringify(serialized)));
+    expect(parsed.sources[0]!.filePath).toBeUndefined();
+  });
+
   it("normaliza fuentes guardadas antes de que existiera `kind` a kind:'video'", () => {
     const timeline = sampleTimeline();
     const serialized = serializeProject(timeline, sampleSources(), [], []);

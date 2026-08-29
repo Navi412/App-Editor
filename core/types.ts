@@ -82,6 +82,16 @@ export interface Clip {
   volume: number;
   /** Si está silenciado, el audio del clip no suena ni se exporta, independientemente de `volume` o `volumeKeyframes`. */
   muted: boolean;
+  /**
+   * Opuesto simétrico de `muted`, pero para el vídeo: si está a true, el
+   * clip no participa en la composición de vídeo (resolveActiveVideoPosition
+   * lo salta, como si no estuviera — se ve lo que haya debajo, o negro),
+   * pero su audio sigue sonando/exportándose con total normalidad, en su
+   * sitio de siempre. Permite "dejar solo audio" de un clip sin moverlo
+   * a otra pista (fuera de alcance, ver CLAUDE.md) — ampliación de
+   * alcance pedida explícitamente el 2026-08-29. Por defecto false/undefined.
+   */
+  videoHidden?: boolean;
   /** Solo relevante si kind === "transition". */
   transitionType?: TransitionType;
   /** Puntos de volumen dentro del clip (orden ascendente por offsetTicks) — ver VolumeKeyframe. undefined/[] = volumen plano (`volume`). */

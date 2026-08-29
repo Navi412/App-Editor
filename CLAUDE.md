@@ -99,6 +99,45 @@ porque dejar el filtro sin ninguna forma de retirarlo sería una trampa
 de usabilidad. Las transiciones (ya en alcance) se insertan de la
 misma forma, arrastradas desde ese mismo panel.
 
+**Rendimiento como prioridad y acceso nativo al sistema de archivos —
+ampliación de alcance pedida explícitamente el 2026-08-29.** El usuario
+pidió explícitamente que la app se sienta y rinda como una de escritorio
+real (DaVinci Resolve/Premiere), no como una web dentro de una ventana.
+Dos consecuencias arquitectónicas, ambas en marcha:
+
+- **Acceso nativo al sistema de archivos.** `electron/preload.cjs`
+  expone `window.appVideo` (`getPathForFile`, `readFileAsBytes`,
+  `fileExists`) vía `contextBridge.exposeInMainWorld` — el renderer
+  SIGUE sin `nodeIntegration` y sin `require()` propio; solo el script
+  de preload gana Node real, y decide explícitamente qué cruza hacia la
+  página. Esto exige `sandbox: false` en `webPreferences` del
+  `BrowserWindow` (el sandbox de preload, activado por defecto desde
+  Electron 20, bloquea hasta `require("fs")` dentro del propio
+  preload — comprobado en vivo, no solo en la documentación de
+  Electron). `ui/electronBridge.ts` es el único punto de `/ui` que toca
+  `window.appVideo`; su ausencia (bajo `npm run dev`, navegador normal
+  sin Electron) es la propia señal de "no hay puente nativo, usa el
+  `<input type=file>` de siempre" — sin ninguna rama de build distinta.
+  `ProjectSource.filePath` (opcional, en `core/project.ts`) guarda la
+  ruta absoluta capturada al cargar un archivo real (nunca sobre un
+  `File` sintético reconstruido por `readFileFromPath` — `getPathForFile`
+  no funciona sobre esos); al recargar un proyecto, `ui/main.ts` intenta
+  releer cada fuente por su `filePath` guardado antes de pedirle nada al
+  usuario, y solo cae al selector de archivos de siempre para las que de
+  verdad falten o se hayan movido.
+  Compromiso de seguridad asumido a propósito: `readFileAsBytes` puede
+  leer cualquier archivo local que el usuario del SO pueda leer — para
+  una app de escritorio de un solo usuario, sin contenido remoto, es un
+  riesgo bajo y aceptado, no un descuido.
+- **Timeline dibujada en canvas**, sustituyendo al DOM de `<div>`s por
+  clip actual — ver el plan en curso, referenciado desde esta sección
+  mientras se implementa por fases.
+
+Deliberadamente **fuera** de esta ampliación: explorador/selector de
+carpeta de medios y watcher de cambios en disco — no hay UI hoy para
+"elegir una carpeta de proyecto", y añadirían complejidad real sin una
+necesidad ya confirmada.
+
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:** arrastrar un clip de una pista a otra, importar archivos
 de solo audio (mp3/wav) como fuente propia para una pista de audio,
@@ -172,10 +211,15 @@ sincronización.
           no al revés.
 /ui       DOM, controles de línea de tiempo, reproductor de previsualización.
 /electron Proceso principal de Electron (electron/main.cjs) — empaqueta
-          la app web como aplicación de escritorio real. Sin preload ni
-          IPC: el renderer usa solo APIs web estándar (File, Canvas,
-          WebCodecs, Web Audio), nunca Node — contextIsolation: true,
-          nodeIntegration: false.
+          la app web como aplicación de escritorio real. El renderer
+          sigue sin nodeIntegration ni require() propio
+          (contextIsolation: true, nodeIntegration: false) — usa APIs
+          web estándar (File, Canvas, WebCodecs, Web Audio) para todo
+          salvo el puente estrecho de electron/preload.cjs
+          (window.appVideo, ver "Rendimiento como prioridad..." más
+          arriba), el único sitio con Node real (necesita
+          sandbox: false, el preload por sí solo no basta desde
+          Electron 20).
 /tests    tests de integración que sí tocan archivos de vídeo reales
           (fixtures pequeños). Los tests unitarios de /core viven junto
           al código que testean, no aquí.
@@ -191,10 +235,11 @@ electron-builder — en esta máquina falla por un problema conocido de
 electron-builder en Windows sin el Modo de desarrollador activado
 (necesita crear symlinks para herramientas de macOS que no usamos). El
 empaquetado manual (copiar `node_modules/electron/dist`, renombrar
-`electron.exe`, y colocar `dist/` + `electron/main.cjs` + un
-`package.json` mínimo en `resources/app/`) es el método oficial de
-Electron para "manual packaging" y no necesita esos privilegios — es
-el que se usó para generar la copia del Escritorio.
+`electron.exe`, y colocar `dist/` + todo `electron/` (main.cjs Y
+preload.cjs — antes solo main.cjs, ya no basta) + un `package.json`
+mínimo en `resources/app/`) es el método oficial de Electron para
+"manual packaging" y no necesita esos privilegios — es el que se usó
+para generar la copia del Escritorio.
 
 Dependencias en una sola dirección: `ui → export → media → core`, y
 `core` no depende de nada del proyecto. Si algún día `core` necesita

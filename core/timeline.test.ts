@@ -3,6 +3,7 @@ import { secondsToTicks } from "./time";
 import {
   addTrack,
   addVolumeKeyframe,
+  allAudioSchedules,
   appendClip,
   audioHeadCutTicks,
   audioTailCutTicks,
@@ -23,6 +24,7 @@ import {
   resolveActiveVideoPosition,
   setClipAudio,
   setClipColorFilter,
+  setClipVideoHidden,
   setTrackHidden,
   splitClipAt,
   timelineDurationTicks,
@@ -178,6 +180,34 @@ describe("composición multipista (capas opacas)", () => {
     expect(pos!.trackId).toBe("bottom");
   });
 
+  it("un clip con videoHidden no participa en la composición, pero se sigue mirando hacia abajo (no corta la búsqueda)", () => {
+    const timeline = twoVideoTrackTimeline();
+    const hidden: Timeline = {
+      ...timeline,
+      tracks: timeline.tracks.map((t) =>
+        t.id === "top" ? { ...t, clips: t.clips.map((c) => ({ ...c, videoHidden: true })) } : t,
+      ),
+    };
+    const pos = resolveActiveVideoPosition(hidden, secondsToTicks(1.5));
+    expect(pos!.trackId).toBe("bottom");
+    expect(pos!.sourceId).toBe("source-a");
+  });
+
+  it("con videoHidden y sin ninguna pista debajo con contenido, devuelve null (negro)", () => {
+    const track: Track = {
+      id: "video-1",
+      kind: "video",
+      hidden: false,
+      clips: [{ ...clip("a", "source-a", 0, 0, 2), videoHidden: true }],
+    };
+    const timeline: Timeline = {
+      tracks: [track],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    expect(resolveActiveVideoPosition(timeline, secondsToTicks(1))).toBeNull();
+  });
+
   it("una pista de audio nunca participa en resolveActiveVideoPosition aunque tenga clips en ese instante", () => {
     const timeline: Timeline = {
       tracks: [
@@ -222,6 +252,15 @@ describe("nextVideoContentTicks", () => {
   it("ignora las pistas de audio", () => {
     const timeline: Timeline = {
       tracks: [{ id: "audio-1", kind: "audio", hidden: false, clips: [clip("m", "music", 1, 0, 5)] }],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    expect(nextVideoContentTicks(timeline, 0)).toBeNull();
+  });
+
+  it("ignora un clip con videoHidden (no aporta contenido de vídeo real)", () => {
+    const timeline: Timeline = {
+      tracks: [{ id: "video-1", kind: "video", hidden: false, clips: [{ ...clip("a", "source-a", 3, 0, 1), videoHidden: true }] }],
       outputResolution: { width: 1920, height: 1080 },
       outputFrameRate: { numerator: 30, denominator: 1 },
     };
@@ -460,6 +499,48 @@ describe("setClipAudio / effectiveClipVolume", () => {
   it("effectiveClipVolume es 0 si el clip está silenciado, independientemente de volume", () => {
     expect(effectiveClipVolume({ ...clip("a", "s", 0, 0, 1), volume: 0.8, muted: true })).toBe(0);
     expect(effectiveClipVolume({ ...clip("a", "s", 0, 0, 1), volume: 0.8, muted: false })).toBe(0.8);
+  });
+});
+
+describe("setClipVideoHidden", () => {
+  it("oculta el vídeo del clip indicado, sin tocar los demás ni su audio", () => {
+    const timeline = twoClipTimeline();
+    const next = setClipVideoHidden(timeline, "video-1", "a", true);
+    const [a, b] = next.tracks[0]!.clips;
+    expect(a!.videoHidden).toBe(true);
+    expect(a!.muted).toBe(false);
+    expect(b!.videoHidden).toBeUndefined();
+  });
+
+  it("con false vuelve a mostrar el vídeo (quita el campo, no lo deja en false)", () => {
+    const hidden = setClipVideoHidden(twoClipTimeline(), "video-1", "a", true);
+    const shown = setClipVideoHidden(hidden, "video-1", "a", false);
+    expect(shown.tracks[0]!.clips[0]!.videoHidden).toBeUndefined();
+  });
+
+  it("lanza con un clipId inexistente", () => {
+    const timeline = twoClipTimeline();
+    expect(() => setClipVideoHidden(timeline, "video-1", "no-existe", true)).toThrow(RangeError);
+  });
+});
+
+describe("videoHidden no afecta al audio (allAudioSchedules)", () => {
+  it("un clip con videoHidden sigue sonando en su sitio de siempre", () => {
+    const track: Track = {
+      id: "video-1",
+      kind: "video",
+      hidden: false,
+      clips: [{ ...clip("a", "source-a", 0, 0, 2), videoHidden: true }],
+    };
+    const timeline: Timeline = {
+      tracks: [track],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const [schedule] = allAudioSchedules(timeline);
+    expect(schedule).toBeDefined();
+    expect(schedule!.sourceId).toBe("source-a");
+    expect(schedule!.durationTicks).toBe(secondsToTicks(2));
   });
 });
 
@@ -706,5 +787,84 @@ describe("audio durante una transición", () => {
     const track = timeline.tracks[0]!;
     const t = track.clips.find((c) => c.kind === "transition")!;
     expect(transitionAudioCues(track, t, secondsToTicks(1))).toEqual([]);
+  });
+});
+
+describe("allAudioSchedules", () => {
+  it("incluye el audio de una pista de vídeo tapada visualmente por otra pista de vídeo por encima (el audio no tiene capas)", () => {
+    // "top" (pista de arriba, índice más alto) tapa a "bottom" entre 1s y 2s,
+    // pero el audio de bottom debe sonar igualmente durante ese tramo.
+    const bottom: Track = { id: "bottom", kind: "video", hidden: false, clips: [clip("b", "source-b", 0, 0, 3)] };
+    const top: Track = { id: "top", kind: "video", hidden: false, clips: [clip("t", "source-t", 1, 0, 1)] };
+    const timeline: Timeline = {
+      tracks: [bottom, top],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const schedules = allAudioSchedules(timeline);
+    const sourceIds = schedules.map((s) => s.sourceId).sort();
+    expect(sourceIds).toEqual(["source-b", "source-t"]);
+  });
+
+  it("incluye los clips propios de una pista de audio independiente", () => {
+    const video: Track = { id: "video-1", kind: "video", hidden: false, clips: [clip("v", "source-v", 0, 0, 2)] };
+    const audio: Track = { id: "audio-1", kind: "audio", hidden: false, clips: [clip("a", "source-a", 0, 0, 2)] };
+    const timeline: Timeline = {
+      tracks: [video, audio],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const sourceIds = allAudioSchedules(timeline)
+      .map((s) => s.sourceId)
+      .sort();
+    expect(sourceIds).toEqual(["source-a", "source-v"]);
+  });
+
+  it("excluye clips de una pista oculta y clips silenciados", () => {
+    const hidden: Track = { id: "hidden", kind: "audio", hidden: true, clips: [clip("h", "source-h", 0, 0, 2)] };
+    const muted: Track = {
+      id: "muted",
+      kind: "video",
+      hidden: false,
+      clips: [{ ...clip("m", "source-m", 0, 0, 2), muted: true }],
+    };
+    const timeline: Timeline = {
+      tracks: [hidden, muted],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    expect(allAudioSchedules(timeline)).toEqual([]);
+  });
+
+  it("incluye los cues de fundido cruzado de una transición junto con el audio normal recortado", () => {
+    const timeline = transitionTimeline();
+    const schedules = allAudioSchedules(timeline);
+    // "a" recortado (audioTailCutTicks) + cue saliente de la transición + cue entrante + "b" recortado (audioHeadCutTicks)
+    expect(schedules).toHaveLength(4);
+    expect(schedules.filter((s) => s.sourceId === "source-a")).toHaveLength(2);
+    expect(schedules.filter((s) => s.sourceId === "source-b")).toHaveLength(2);
+  });
+
+  it("desde fromTicks a mitad de un clip, arranca ya adelantado en la fuente y con la duración restante", () => {
+    const track: Track = { id: "video-1", kind: "video", hidden: false, clips: [clip("a", "source-a", 0, 0, 4)] };
+    const timeline: Timeline = {
+      tracks: [track],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const [schedule] = allAudioSchedules(timeline, secondsToTicks(1.5));
+    expect(schedule!.startTicks).toBe(secondsToTicks(1.5));
+    expect(schedule!.sourceStartTicks).toBe(secondsToTicks(1.5));
+    expect(schedule!.durationTicks).toBe(secondsToTicks(2.5));
+  });
+
+  it("un clip que ya terminó antes de fromTicks no genera ninguna franja", () => {
+    const track: Track = { id: "video-1", kind: "video", hidden: false, clips: [clip("a", "source-a", 0, 0, 2)] };
+    const timeline: Timeline = {
+      tracks: [track],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    expect(allAudioSchedules(timeline, secondsToTicks(2))).toEqual([]);
   });
 });

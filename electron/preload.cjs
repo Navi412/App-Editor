@@ -17,7 +17,7 @@
 // remoto, es un riesgo bajo — y siempre se invoca con una ruta que o bien
 // viene de getPathForFile (un archivo que el propio usuario acaba de
 // elegir) o de un JSON de proyecto que el propio usuario escribió.
-const { contextBridge, webUtils } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const fs = require("node:fs/promises");
 
 contextBridge.exposeInMainWorld("appVideo", {
@@ -38,5 +38,9 @@ contextBridge.exposeInMainWorld("appVideo", {
     } catch {
       return false;
     }
+  },
+  /** Se suscribe a las acciones del menú nativo (electron/main.cjs). El renderer las mapea a los botones que ya existen — ver MENU_ACTIONS en ui/main.ts. */
+  onMenuAction(callback) {
+    ipcRenderer.on("menu-action", (_event, action) => callback(action));
   },
 });

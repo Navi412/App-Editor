@@ -3,11 +3,14 @@ import {
   allAudioSchedules,
   clipDurationTicks,
   resolveActiveVideoPosition,
+  resolveActiveVideoPositionBelow,
   timelineDurationTicks,
 } from "../core/timeline";
+import { ColorGradeRenderer } from "../media/colorGradeGL";
 import type { Clip, Timeline, Track } from "../core/types";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import { playAudioSlice } from "../media/audioPlayer";
+import { createMasterAudioChain } from "../media/masterAudioChain";
 import { drawFrameFit } from "../media/render";
 import type { DemuxedTrack } from "../media/samples";
 import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
@@ -111,6 +114,16 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
     throw new Error("No se pudo crear el contexto 2D de exportación");
   }
 
+  // Grading real/croma (ver core/types.ts) — instancia propia de la
+  // exportación, independiente de la del preview en vivo (ui/main.ts),
+  // igual que cada uno tiene su propio AudioContext/OfflineAudioContext.
+  let gradeRenderer: ColorGradeRenderer | undefined;
+  try {
+    gradeRenderer = new ColorGradeRenderer();
+  } catch (error) {
+    console.warn("Grading real desactivado en la exportación (WebGL2 no disponible):", error);
+  }
+
   const durationUnits = Math.round(ticksToSeconds(totalTicks) * 1_000_000);
   const muxer = createMp4Muxer({ width, height, timescale: 1_000_000, durationUnits });
 
@@ -170,12 +183,43 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
         const progress = duration > 0 ? (timelineTicks - position.clip.startTicks) / duration : 0;
         drawTransitionFrame(ctx, width, height, position.clip.transitionType ?? "crossfade", frames, progress);
       } else {
+        // Croma activo: se resuelve y dibuja PRIMERO la pista de vídeo
+        // visible inmediatamente inferior (si tiene contenido ahí) como
+        // fondo, y el clip con croma se compone encima sin volver a
+        // limpiar (clear:false) — únicamente en la exportación, ver
+        // ChromaKey en core/types.ts sobre por qué el preview en directo
+        // no compone dos capas.
+        if (position.clip.chromaKey?.enabled) {
+          const aboveTrackIndex = timeline.tracks.findIndex((t) => t.id === position.trackId);
+          const below = resolveActiveVideoPositionBelow(timeline, timelineTicks, aboveTrackIndex);
+          let drewBackground = false;
+          if (below && below.clip.kind === "clip") {
+            const belowTimeUs = Math.round(ticksToSeconds(below.sourceTimeTicks) * 1_000_000);
+            const belowFrame = await seekerFor(below.sourceId).next(belowTimeUs);
+            if (belowFrame) {
+              drawFrameFit(ctx, belowFrame, { width, height }, below.clip.colorFilter, below.clip.colorGrade, below.clip.chromaKey, gradeRenderer);
+              belowFrame.close();
+              drewBackground = true;
+            }
+          }
+          if (!drewBackground) ctx.clearRect(0, 0, width, height);
+        }
+
         const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
         const frame = await seekerFor(position.sourceId).next(sourceTimeUs);
         if (frame) {
-          drawFrameFit(ctx, frame, { width, height }, position.clip.colorFilter);
+          drawFrameFit(
+            ctx,
+            frame,
+            { width, height },
+            position.clip.colorFilter,
+            position.clip.colorGrade,
+            position.clip.chromaKey,
+            gradeRenderer,
+            !position.clip.chromaKey?.enabled, // clear:false si ya se dibujó un fondo encima del que componer
+          );
           frame.close();
-        } else {
+        } else if (!position.clip.chromaKey?.enabled) {
           ctx.clearRect(0, 0, width, height);
         }
       }
@@ -214,6 +258,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
       frames.fromImage?.close();
       frames.toImage?.close();
     }
+    gradeRenderer?.destroy();
   }
 
   return muxer.finalize();
@@ -238,12 +283,14 @@ async function renderExportAudio(timeline: Timeline, getAudio: (sourceId: string
   const totalSeconds = Math.max(ticksToSeconds(timelineDurationTicks(timeline)), 1 / AUDIO_SAMPLE_RATE);
   const totalFrames = Math.max(1, Math.ceil(totalSeconds * AUDIO_SAMPLE_RATE));
   const offline = new OfflineAudioContext(AUDIO_CHANNELS, totalFrames, AUDIO_SAMPLE_RATE);
+  const masterChain = createMasterAudioChain(offline, offline.destination, timeline.masterAudio);
 
   for (const schedule of allAudioSchedules(timeline)) {
     const sourceBuffer = getAudio(schedule.sourceId);
     if (!sourceBuffer) continue;
     playAudioSlice(
       offline,
+      masterChain.input,
       sourceBuffer,
       ticksToSeconds(schedule.sourceStartTicks),
       ticksToSeconds(schedule.durationTicks),

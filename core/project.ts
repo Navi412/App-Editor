@@ -1,6 +1,6 @@
 import type { FrameRate } from "./time";
 import type { TextOverlay } from "./textOverlay";
-import type { Clip, Resolution, SourceFile, Timeline, Track, TrackKind, VolumeKeyframe } from "./types";
+import type { ChromaKey, Clip, ColorGrade, MasterAudio, Resolution, SourceFile, Timeline, Track, TrackKind, VolumeKeyframe } from "./types";
 
 /** Marcador de anotación en la timeline — no afecta al render, solo navegación. */
 export interface Marker {
@@ -43,6 +43,8 @@ export interface ProjectFile {
   tracks: Track[];
   markers: Marker[];
   textOverlays: TextOverlay[];
+  /** undefined = sin procesado de máster configurado — ver MasterAudio en types.ts. Ampliación de alcance pedida explícitamente el 2026-08-29. */
+  masterAudio?: MasterAudio;
 }
 
 export function serializeProject(
@@ -59,7 +61,21 @@ export function serializeProject(
     tracks: timeline.tracks,
     markers,
     textOverlays,
+    ...(timeline.masterAudio ? { masterAudio: timeline.masterAudio } : {}),
   };
+}
+
+function isMasterAudio(value: unknown): value is MasterAudio {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.enabled === "boolean" &&
+    isFiniteNumber(v.eqLowDb) &&
+    isFiniteNumber(v.eqMidDb) &&
+    isFiniteNumber(v.eqHighDb) &&
+    isFiniteNumber(v.compressionAmount) &&
+    isFiniteNumber(v.makeupGainDb)
+  );
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -124,6 +140,41 @@ interface RawClip {
   transitionType?: string;
   volumeKeyframes?: VolumeKeyframe[];
   colorFilter?: string;
+  colorGrade?: ColorGrade;
+  chromaKey?: ChromaKey;
+  flagged?: boolean;
+}
+
+function isColorGrade(value: unknown): value is ColorGrade {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    isFiniteNumber(v.liftR) &&
+    isFiniteNumber(v.liftG) &&
+    isFiniteNumber(v.liftB) &&
+    isFiniteNumber(v.gammaR) &&
+    isFiniteNumber(v.gammaG) &&
+    isFiniteNumber(v.gammaB) &&
+    isFiniteNumber(v.gainR) &&
+    isFiniteNumber(v.gainG) &&
+    isFiniteNumber(v.gainB) &&
+    isFiniteNumber(v.saturation) &&
+    isFiniteNumber(v.contrast) &&
+    typeof v.invert === "boolean"
+  );
+}
+
+function isChromaKey(value: unknown): value is ChromaKey {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.enabled === "boolean" &&
+    isFiniteNumber(v.keyR) &&
+    isFiniteNumber(v.keyG) &&
+    isFiniteNumber(v.keyB) &&
+    isFiniteNumber(v.similarity) &&
+    isFiniteNumber(v.smoothness)
+  );
 }
 
 /** Acepta clips sin `volume`/`muted`/`videoHidden`/`kind`/`startTicks`/`transitionType`/`volumeKeyframes` (proyectos guardados antes de que existieran esos campos) — se normalizan en migrateClipsRipple. */
@@ -143,7 +194,10 @@ function isRawClip(value: unknown): value is RawClip {
     (v.transitionType === undefined ||
       (typeof v.transitionType === "string" && TRANSITION_TYPES.has(v.transitionType))) &&
     (v.volumeKeyframes === undefined || isVolumeKeyframeArray(v.volumeKeyframes)) &&
-    (v.colorFilter === undefined || (typeof v.colorFilter === "string" && COLOR_FILTER_TYPES.has(v.colorFilter)))
+    (v.colorFilter === undefined || (typeof v.colorFilter === "string" && COLOR_FILTER_TYPES.has(v.colorFilter))) &&
+    (v.colorGrade === undefined || isColorGrade(v.colorGrade)) &&
+    (v.chromaKey === undefined || isChromaKey(v.chromaKey)) &&
+    (v.flagged === undefined || typeof v.flagged === "boolean")
   );
 }
 
@@ -182,6 +236,9 @@ function migrateClipsRipple(rawClips: RawClip[]): Clip[] {
       if (raw.transitionType) normalized.transitionType = raw.transitionType as NonNullable<Clip["transitionType"]>;
       if (raw.volumeKeyframes) normalized.volumeKeyframes = raw.volumeKeyframes;
       if (raw.colorFilter) normalized.colorFilter = raw.colorFilter as NonNullable<Clip["colorFilter"]>;
+      if (raw.colorGrade) normalized.colorGrade = raw.colorGrade;
+      if (raw.chromaKey) normalized.chromaKey = raw.chromaKey;
+      if (raw.flagged) normalized.flagged = true;
       clips.push(normalized);
     }
     cursor = startTicks + duration;
@@ -300,6 +357,7 @@ export function parseProjectFile(data: unknown): ProjectFile {
     Array.isArray(obj.textOverlays) && obj.textOverlays.every(isTextOverlay)
       ? obj.textOverlays.map(normalizeTextOverlay)
       : [];
+  const masterAudio = isMasterAudio(obj.masterAudio) ? obj.masterAudio : undefined;
 
   return {
     version: 1,
@@ -309,5 +367,6 @@ export function parseProjectFile(data: unknown): ProjectFile {
     tracks,
     markers,
     textOverlays,
+    ...(masterAudio ? { masterAudio } : {}),
   };
 }

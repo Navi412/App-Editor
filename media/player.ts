@@ -127,6 +127,15 @@ export function createVideoPlayer(
 
   let decoder = createDecoder();
 
+  /** `VideoDecoder.close()` lanza si el decoder ya está cerrado (p.ej. un seek anterior que se rindió a mitad de flush, o un doble destroy()). Cerrarlo "en silencio" evita que ese throw se propague y aborte el seekTo que viene detrás — lo que dejaba el vídeo congelado (solo seguía el audio, ya programado). */
+  function closeDecoderQuietly(target: VideoDecoder): void {
+    try {
+      if (target.state !== "closed") target.close();
+    } catch {
+      /* ya estaba cerrado */
+    }
+  }
+
   function feed(): void {
     while (
       nextSampleIndex < samples.length &&
@@ -234,9 +243,17 @@ export function createVideoPlayer(
     // Decoder nuevo en vez de reset(): evita depender de que reset()+
     // configure() deje al decoder en un estado limpio equivalente, y
     // el coste de recrearlo es irrelevante a la cadencia humana de un scrub.
-    decoder.close();
+    closeDecoderQuietly(decoder);
     const activeDecoder = createDecoder();
     decoder = activeDecoder;
+    // Un decoder recién configurado (o recién salido de un flush) EXIGE
+    // que el próximo decode() sea un keyframe. Se marca YA, no después
+    // del flush: si el flush de abajo se rechaza y se sale antes de
+    // tiempo, `play()` tiene que saber igualmente que hay que re-cebar
+    // desde un keyframe — sin esto, feed() metía un delta en el decoder
+    // limpio y la reproducción se quedaba congelada al reanudar tras un
+    // hueco (solo volvía el audio, ya programado por adelantado).
+    decoderNeedsKeyframe = true;
 
     for (let i = keyframeIndex; i <= targetDecodeIndex; i++) {
       const sample = samples[i]!;
@@ -254,9 +271,14 @@ export function createVideoPlayer(
     try {
       await activeDecoder.flush();
     } catch {
-      return; // un seek más nuevo cerró este decoder a mitad de flush; el suyo manda
+      // Un seek más nuevo cerró este decoder a mitad de flush (su seek
+      // manda), o un chunk lo dejó en error. Si nadie nos ha
+      // adelantado, deja `nextSampleIndex` en el keyframe objetivo para
+      // que el próximo feed()/play() arranque desde ahí y no meta un
+      // delta en un decoder recién creado.
+      if (generation === seekGeneration) nextSampleIndex = keyframeIndex;
+      return;
     }
-    decoderNeedsKeyframe = true;
     if (generation !== seekGeneration) {
       // un seek más nuevo ya completó mientras este flush estaba en vuelo
       for (const frame of outputQueue.splice(0)) frame.close();
@@ -299,7 +321,7 @@ export function createVideoPlayer(
       playing = false;
       cancelAnimationFrame(rafHandle);
       for (const frame of outputQueue.splice(0)) frame.close();
-      decoder.close();
+      closeDecoderQuietly(decoder);
     },
   };
 }

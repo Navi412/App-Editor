@@ -21,9 +21,18 @@ export function scheduleGain(gainParam: AudioParam, points: readonly VolumeAutom
   }
 }
 
-/** `BaseAudioContext` en vez de `AudioContext`: así también sirve para un `OfflineAudioContext` (export/exportTimeline.ts), que comparte createBufferSource/createGain/destination pero no es un AudioContext en directo. */
+/**
+ * `BaseAudioContext` en vez de `AudioContext`: así también sirve para un
+ * `OfflineAudioContext` (export/exportTimeline.ts), que comparte
+ * createBufferSource/createGain pero no es un AudioContext en directo.
+ * `destination` es explícito (en vez de `audioContext.destination`
+ * siempre) para poder enrutar a través del bus máster — ver
+ * media/masterAudioChain.ts — sin que este módulo necesite saber nada
+ * de EQ/compresión.
+ */
 export function playAudioSlice(
   audioContext: BaseAudioContext,
+  destination: AudioNode,
   buffer: AudioBuffer,
   offsetSeconds: number,
   durationSeconds: number,
@@ -39,7 +48,7 @@ export function playAudioSlice(
     gainNode.gain.value = gain;
   }
   source.connect(gainNode);
-  gainNode.connect(audioContext.destination);
+  gainNode.connect(destination);
   const safeOffset = Math.max(0, Math.min(offsetSeconds, buffer.duration));
   const safeDuration = Math.max(0, Math.min(durationSeconds, buffer.duration - safeOffset));
   source.start(when, safeOffset, safeDuration);

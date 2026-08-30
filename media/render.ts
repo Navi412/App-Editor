@@ -1,4 +1,5 @@
-import type { ColorFilterType } from "../core/types";
+import { NEUTRAL_COLOR_GRADE, type ChromaKey, type ColorFilterType, type ColorGrade } from "../core/types";
+import { needsColorGradeGL, type ColorGradeRenderer } from "./colorGradeGL";
 
 export interface Size {
   width: number;
@@ -49,16 +50,38 @@ export function colorFilterCss(colorFilter: ColorFilterType | undefined): string
   return colorFilter ? COLOR_FILTER_CSS[colorFilter] : "none";
 }
 
-/** Pinta un VideoFrame en `ctx` con aspect-fit sobre el tamaño `target`, con barras negras si hace falta, aplicando `colorFilter` si se indica. */
+/**
+ * Pinta un VideoFrame en `ctx` con aspect-fit sobre el tamaño `target`,
+ * con barras negras si hace falta, aplicando `colorFilter` (preset CSS,
+ * de siempre) y opcionalmente `colorGrade`/`chromaKey` (grading real +
+ * croma vía WebGL, ver media/colorGradeGL.ts — ampliación de alcance
+ * del 2026-08-29). El grading se aplica ANTES del filtro CSS (orden
+ * fijo, nunca al revés): si no hay `gradeRenderer` o ni `colorGrade` ni
+ * `chromaKey` cambiarían nada, se salta esa pasada entera y el coste es
+ * exactamente el de siempre (un solo drawImage).
+ *
+ * `clear` (true por defecto) controla si se limpia `target` antes de
+ * pintar — a false para componer ENCIMA de lo que ya haya en `ctx` (ver
+ * export/exportTimeline.ts, que dibuja primero la capa de fondo de un
+ * croma con `clear:true` y luego la capa recortada con `clear:false`).
+ */
 export function drawFrameFit(
   ctx: FrameDrawTarget,
   frame: VideoFrame,
   target: Size,
   colorFilter?: ColorFilterType,
+  colorGrade?: ColorGrade,
+  chromaKey?: ChromaKey,
+  gradeRenderer?: ColorGradeRenderer,
+  clear: boolean = true,
 ): void {
-  ctx.clearRect(0, 0, target.width, target.height);
+  if (clear) ctx.clearRect(0, 0, target.width, target.height);
   const rect = computeFitRect({ width: frame.displayWidth, height: frame.displayHeight }, target);
   ctx.filter = colorFilterCss(colorFilter);
-  ctx.drawImage(frame, rect.x, rect.y, rect.width, rect.height);
+  const source =
+    gradeRenderer && needsColorGradeGL(colorGrade, chromaKey)
+      ? gradeRenderer.draw(frame, colorGrade ?? NEUTRAL_COLOR_GRADE, chromaKey)
+      : frame;
+  ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height);
   ctx.filter = "none";
 }

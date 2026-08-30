@@ -1,5 +1,16 @@
 import { ticksToSeconds } from "./time";
-import type { Clip, ColorFilterType, Timeline, Track, TrackKind, TransitionType, VolumeKeyframe } from "./types";
+import type {
+  ChromaKey,
+  Clip,
+  ColorFilterType,
+  ColorGrade,
+  MasterAudio,
+  Timeline,
+  Track,
+  TrackKind,
+  TransitionType,
+  VolumeKeyframe,
+} from "./types";
 
 /**
  * Todas las funciones de este módulo son puras: reciben una Timeline y
@@ -93,6 +104,39 @@ export function resolveActiveVideoPosition(timeline: Timeline, timelineTicks: nu
     // allAudioSchedules, que nunca consulta este campo) pero no
     // participa en la composición de vídeo — como si esta pista no
     // tuviera contenido en este instante, se sigue mirando hacia abajo.
+    if (clip.videoHidden) continue;
+    return {
+      clip,
+      clipIndex,
+      trackId: track.id,
+      sourceId: clip.sourceId,
+      sourceTimeTicks: clip.sourceInTicks + (timelineTicks - clip.startTicks),
+    };
+  }
+  return null;
+}
+
+/**
+ * Como resolveActiveVideoPosition, pero empieza a buscar en la pista de
+ * vídeo INMEDIATAMENTE debajo del índice `aboveTrackIndex` de
+ * `timeline.tracks`, en vez de desde la más alta de todas — la capa de
+ * fondo sobre la que se compone un clip con croma activo, SOLO en la
+ * exportación (export/exportTimeline.ts) — ver ChromaKey en types.ts
+ * sobre por qué la previsualización en directo no compone dos capas.
+ * Ampliación de alcance pedida explícitamente el 2026-08-29.
+ */
+export function resolveActiveVideoPositionBelow(
+  timeline: Timeline,
+  timelineTicks: number,
+  aboveTrackIndex: number,
+): TimelinePosition | null {
+  if (timelineTicks < 0) return null;
+  for (let i = aboveTrackIndex - 1; i >= 0; i--) {
+    const track = timeline.tracks[i]!;
+    if (track.kind !== "video" || track.hidden) continue;
+    const clipIndex = track.clips.findIndex((c) => timelineTicks >= c.startTicks && timelineTicks < clipEndTicks(c));
+    if (clipIndex === -1) continue;
+    const clip = track.clips[clipIndex]!;
     if (clip.videoHidden) continue;
     return {
       clip,
@@ -349,6 +393,80 @@ export function trimClipOut(
   });
 }
 
+/**
+ * Desplaza en `deltaTicks` el `startTicks` de todos los clips de
+ * `track` que empiecen en o después de `fromTicks` — el ripple en sí,
+ * compartido por trimClipInRipple/trimClipOutRipple. Lanza si algún
+ * clip acabaría en una posición negativa.
+ */
+function rippleShiftFrom(track: Track, fromTicks: number, deltaTicks: number): Clip[] {
+  if (deltaTicks === 0) return track.clips;
+  return track.clips.map((c) => {
+    if (c.startTicks < fromTicks) return c;
+    const shiftedStart = c.startTicks + deltaTicks;
+    if (shiftedStart < 0) {
+      throw new RangeError("El ripple dejaría un clip en una posición negativa");
+    }
+    return { ...c, startTicks: shiftedStart };
+  });
+}
+
+/**
+ * Como trimClipIn, pero además desplaza todos los clips de la MISMA
+ * pista que empiecen en o después del final ORIGINAL del clip
+ * recortado, por la misma diferencia que cambia ese final — así el
+ * recorte no abre ni cierra un hueco (ripple clásico de un NLE).
+ * trimClipIn/trimClipOut (sin ripple) siguen siendo el comportamiento
+ * por defecto — decisión deliberada del 2026-08-21, ver CLAUDE.md; esta
+ * variante es opt-in (Mayús+arrastre en la UI), ampliación de alcance
+ * pedida explícitamente el 2026-08-29.
+ */
+export function trimClipInRipple(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  newSourceInTicks: number,
+  minDurationTicks: number,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    if (newSourceInTicks < 0) {
+      throw new RangeError("sourceInTicks no puede ser negativo");
+    }
+    if (clip.sourceOutTicks - newSourceInTicks < minDurationTicks) {
+      throw new RangeError("El recorte dejaría el clip por debajo de la duración mínima");
+    }
+    const originalEndTicks = clipEndTicks(clip);
+    const newEndTicks = clip.startTicks + (clip.sourceOutTicks - newSourceInTicks);
+    const shifted = rippleShiftFrom(track, originalEndTicks, newEndTicks - originalEndTicks);
+    const clips = shifted.map((c) => (c.id === clipId ? { ...c, sourceInTicks: newSourceInTicks } : c));
+    return { ...track, clips };
+  });
+}
+
+/** Como trimClipOut, con el mismo ripple que trimClipInRipple — ver su doc. */
+export function trimClipOutRipple(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  newSourceOutTicks: number,
+  minDurationTicks: number,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    if (newSourceOutTicks - clip.sourceInTicks < minDurationTicks) {
+      throw new RangeError("El recorte dejaría el clip por debajo de la duración mínima");
+    }
+    const originalEndTicks = clipEndTicks(clip);
+    const newEndTicks = clip.startTicks + (newSourceOutTicks - clip.sourceInTicks);
+    const shifted = rippleShiftFrom(track, originalEndTicks, newEndTicks - originalEndTicks);
+    const clips = shifted.map((c) => (c.id === clipId ? { ...c, sourceOutTicks: newSourceOutTicks } : c));
+    return { ...track, clips };
+  });
+}
+
 /** Ganancia de audio (0-1, se recorta a ese rango) y silencio de un clip. */
 export function setClipAudio(
   timeline: Timeline,
@@ -383,6 +501,18 @@ export function setClipVideoHidden(timeline: Timeline, trackId: string, clipId: 
   });
 }
 
+/** Marca/desmarca la bandera de un clip (estilo Resolve, tecla G) — solo visual, sin efecto en reproducción/exportación. */
+export function setClipFlagged(timeline: Timeline, trackId: string, clipId: string, flagged: boolean): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const { flagged: _previous, ...rest } = clip;
+    const clips = [...track.clips];
+    clips[index] = flagged ? { ...rest, flagged: true } : rest;
+    return { ...track, clips };
+  });
+}
+
 /** Cambia (o quita, con undefined) el filtro de color de un clip. Ver ColorFilterType. */
 export function setClipColorFilter(
   timeline: Timeline,
@@ -396,6 +526,58 @@ export function setClipColorFilter(
     const { colorFilter: _previous, ...rest } = clip;
     const clips = [...track.clips];
     clips[index] = colorFilter ? { ...rest, colorFilter } : rest;
+    return { ...track, clips };
+  });
+}
+
+/** Cambia (o quita, con undefined) el grading real de un clip. Ver ColorGrade. */
+export function setClipColorGrade(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  colorGrade: ColorGrade | undefined,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const { colorGrade: _previous, ...rest } = clip;
+    const clips = [...track.clips];
+    clips[index] = colorGrade ? { ...rest, colorGrade } : rest;
+    return { ...track, clips };
+  });
+}
+
+/** true si `grade` no cambiaría nada visible (equivalente a no tener grading) — evita levantar WebGL para nada, ver media/colorGradeGL.ts. */
+export function isNeutralColorGrade(grade: ColorGrade): boolean {
+  return (
+    grade.liftR === 0 &&
+    grade.liftG === 0 &&
+    grade.liftB === 0 &&
+    grade.gammaR === 1 &&
+    grade.gammaG === 1 &&
+    grade.gammaB === 1 &&
+    grade.gainR === 1 &&
+    grade.gainG === 1 &&
+    grade.gainB === 1 &&
+    grade.saturation === 1 &&
+    grade.contrast === 1 &&
+    !grade.invert
+  );
+}
+
+/** Cambia (o quita, con undefined) el croma de un clip. Ver ChromaKey. */
+export function setClipChromaKey(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  chromaKey: ChromaKey | undefined,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    const { chromaKey: _previous, ...rest } = clip;
+    const clips = [...track.clips];
+    clips[index] = chromaKey ? { ...rest, chromaKey } : rest;
     return { ...track, clips };
   });
 }
@@ -706,4 +888,34 @@ export function allAudioSchedules(timeline: Timeline, fromTicks: number = 0): Au
     }
   }
   return schedules;
+}
+
+/** Sin procesado — comportamiento idéntico al de antes de esta ampliación (ver MasterAudio en core/types.ts). */
+export const NEUTRAL_MASTER_AUDIO: MasterAudio = {
+  enabled: false,
+  eqLowDb: 0,
+  eqMidDb: 0,
+  eqHighDb: 0,
+  compressionAmount: 0,
+  makeupGainDb: 0,
+};
+
+export function setMasterAudio(timeline: Timeline, masterAudio: MasterAudio): Timeline {
+  return { ...timeline, masterAudio };
+}
+
+/**
+ * Traduce el mando único `compressionAmount` (0-100, ver MasterAudio)
+ * a umbral/ratio reales de DynamicsCompressorNode — única función que
+ * conoce esta correspondencia, para que la UI (un mando) y el motor de
+ * audio (dos parámetros) no puedan divergir. 0 → umbral 0dB/ratio 1
+ * (sin compresión audible); 100 → umbral -30dB/ratio 12 (fuerte).
+ */
+export function compressorParamsFromAmount(amount: number): { thresholdDb: number; ratio: number } {
+  const clamped = Math.max(0, Math.min(100, amount));
+  return {
+    // El propio 0 evita -0 (JS: -(0)*30 === -0, que toEqual distingue de 0).
+    thresholdDb: clamped === 0 ? 0 : -(clamped / 100) * 30,
+    ratio: 1 + (clamped / 100) * 11,
+  };
 }

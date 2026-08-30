@@ -2,20 +2,49 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
+    <meta name="color-scheme" content="light" />
     <title>App Video</title>
     <link rel="stylesheet" href="/ui/styles.css" />
   </head>
   <body>
     <header>
+      <div class="app-menu">
+        <button id="app-menu-button" type="button" class="app-menu-button" title="Menú" aria-haspopup="true" aria-expanded="false">
+          <span data-icon="menu"></span>
+        </button>
+        <div id="app-menu-dropdown" class="app-menu-dropdown" hidden></div>
+      </div>
+
       <h1>App Video</h1>
-      <input id="file-input" type="file" accept="video/mp4" />
-      <button id="undo-button" type="button" disabled title="Deshacer (Ctrl+Z)">↶ Deshacer</button>
-      <button id="redo-button" type="button" disabled title="Rehacer (Ctrl+Y)">↷ Rehacer</button>
-      <button id="save-project-button" type="button" disabled title="Guardar proyecto">💾 Guardar</button>
-      <button id="load-project-button" type="button" title="Cargar proyecto">📂 Cargar</button>
+      <span id="project-name" class="project-name" hidden></span>
+
+      <div class="toolbar-group">
+        <label class="button-like" for="file-input" title="Abrir un vídeo">
+          <span data-icon="folderOpen"></span> Abrir vídeo
+        </label>
+        <input id="file-input" type="file" accept="video/mp4" hidden />
+      </div>
+
+      <div class="toolbar-group">
+        <button id="undo-button" type="button" disabled title="Deshacer (Ctrl+Z)">
+          <span data-icon="undo"></span> Deshacer
+        </button>
+        <button id="redo-button" type="button" disabled title="Rehacer (Ctrl+Y)">
+          <span data-icon="redo"></span> Rehacer
+        </button>
+      </div>
+
+      <!-- Guardar/Cargar viven en el menú (Archivo). Se mantienen como
+           botones ocultos porque el menú los activa con .click() y varias
+           partes de ui/main.ts referencian sus IDs. -->
+      <button id="save-project-button" type="button" disabled title="Guardar proyecto" hidden>Guardar</button>
+      <button id="load-project-button" type="button" title="Cargar proyecto" hidden>Cargar</button>
       <input id="project-file-input" type="file" accept="application/json,.json" hidden />
       <input id="project-sources-input" type="file" accept="video/mp4" multiple hidden />
-      <span class="hint">Arrastra un clip para moverlo (deja o cierra huecos) · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
+
+      <span class="hint">Arrastra un clip para moverlo · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
+
+      <button id="help-button" type="button" class="help-button" data-icon="helpCircle" title="Atajos de teclado"></button>
     </header>
     <p id="project-status" class="project-status"></p>
 
@@ -25,7 +54,7 @@
         <h2>Efectos</h2>
         <p class="hint-inline">Arrastra un efecto sobre un clip de la línea de tiempo para aplicarlo.</p>
         <details class="effect-folder" open>
-          <summary>🔀 Transiciones</summary>
+          <summary><span data-icon="layers"></span> Transiciones</summary>
           <div class="effect-folder-body">
             <button type="button" class="effect-chip" draggable="true" data-effect-kind="transition" data-effect-value="crossfade">
               Fundido cruzado
@@ -33,10 +62,20 @@
             <button type="button" class="effect-chip" draggable="true" data-effect-kind="transition" data-effect-value="dipToBlack">
               Fundido a negro
             </button>
+            <label class="effect-duration"
+              >Duración (s)
+              <input id="transition-duration" type="number" step="0.1" min="0.1" value="0.5" />
+            </label>
+            <!-- Tipo usado solo por el botón "Insertar transición" del menú Editar
+                 (los chips de arriba ya llevan su propio tipo al arrastrarlos). -->
+            <select id="transition-type" hidden title="Tipo de transición">
+              <option value="crossfade">Fundido cruzado</option>
+              <option value="dipToBlack">Fundido a negro</option>
+            </select>
           </div>
         </details>
         <details class="effect-folder" open>
-          <summary>🎨 Filtros de color</summary>
+          <summary><span data-icon="palette"></span> Filtros de color</summary>
           <div class="effect-folder-body">
             <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="grayscale">
               Blanco y negro
@@ -63,39 +102,59 @@
       <div class="preview-column">
         <div class="preview-canvas-wrap" id="preview-wrap">
           <canvas id="preview"></canvas>
+          <label class="drop-zone" id="drop-zone" for="file-input">
+            <span data-icon="upload"></span>
+            <strong>Arrastra un vídeo aquí</strong>
+            <span>o haz clic para elegir un archivo (.mp4)</span>
+          </label>
         </div>
         <div class="transport">
-          <button id="play-button" type="button" disabled>▶ Reproducir</button>
-          <button id="pause-button" type="button" disabled>❚❚ Pausa</button>
+          <button id="play-button" type="button" disabled><span data-icon="play"></span> Reproducir</button>
+          <button id="pause-button" type="button" disabled><span data-icon="pause"></span> Pausa</button>
           <button id="preview-zoom-button" type="button" disabled title="Alternar zoom 100% / ajustado">
-            Ajustado
+            <span data-icon="maximize"></span> <span id="preview-zoom-label">Ajustado</span>
           </button>
           <span id="status" class="time"></span>
         </div>
       </div>
 
       <aside class="side-panel">
-        <details class="panel-section" id="trim-details">
-          <summary><h2>Recorte del clip</h2></summary>
+        <details class="panel-section" id="media-bin-details" hidden open>
+          <summary><h2>Bin de medios</h2></summary>
+          <div class="panel-section-body">
+            <p class="hint-inline">Los archivos ya cargados en el proyecto — añade otro clip del mismo archivo sin volver a elegirlo.</p>
+            <ul id="media-bin-list" class="media-bin-list"></ul>
+          </div>
+        </details>
+
+        <p id="inspector-hint" class="inspector-hint" hidden>
+          Selecciona un clip en la línea de tiempo para editar su recorte, color y croma.
+        </p>
+
+        <details class="panel-section" id="trim-details" hidden open>
+          <summary><h2>Clip</h2></summary>
           <div class="panel-section-body">
             <fieldset id="trim-controls" disabled style="border: none; padding: 0; margin: 0">
-              <div class="field-grid">
-                <label>Entrada (s) <input id="trim-in" type="number" step="0.1" min="0" value="0" /></label>
-                <label>Salida (s) <input id="trim-out" type="number" step="0.1" min="0" value="0" /></label>
-              </div>
-              <button id="apply-trim" type="button" class="primary">Aplicar recorte</button>
               <div class="field-group">
-                <label class="checkbox-row"><input id="clip-muted" type="checkbox" /> Silenciar clip (solo vídeo)</label>
-                <label class="checkbox-row"
-                  ><input id="clip-video-hidden" type="checkbox" /> Ocultar vídeo (solo audio)</label
-                >
-                <p class="hint-inline">
-                  Arrastra la pista de audio (abajo) para el volumen · Alt+clic ahí para editarlo por trozos.
-                </p>
+                <span class="field-group-label">Recorte</span>
+                <div class="field-grid">
+                  <label>Entrada (s) <input id="trim-in" type="number" step="0.1" min="0" value="0" /></label>
+                  <label>Salida (s) <input id="trim-out" type="number" step="0.1" min="0" value="0" /></label>
+                </div>
+                <button id="apply-trim" type="button" class="primary">Aplicar recorte</button>
               </div>
+
               <div class="field-group">
+                <span class="field-group-label">Audio del clip</span>
+                <label class="checkbox-row"><input id="clip-muted" type="checkbox" /> Silenciar (solo vídeo)</label>
+                <label class="checkbox-row"><input id="clip-video-hidden" type="checkbox" /> Ocultar vídeo (solo audio)</label>
+                <p class="hint-inline">Volumen: arrastra la pista de audio abajo · Alt+clic ahí para editarlo por trozos.</p>
+              </div>
+
+              <div class="field-group">
+                <span class="field-group-label">Filtro de color</span>
                 <label
-                  >Filtro de color
+                  >Preset
                   <select id="clip-color-filter">
                     <option value="">Ninguno</option>
                     <option value="grayscale">Blanco y negro</option>
@@ -108,6 +167,99 @@
                 </label>
                 <p class="hint-inline">Se aplica arrastrando un filtro desde el panel de efectos.</p>
               </div>
+
+              <details class="sub-section" id="grade-sub">
+                <summary>Grading avanzado (lift / gamma / gain)</summary>
+                <div class="sub-section-body">
+                  <div class="slider-row">
+                    <span>Lift R</span>
+                    <input id="grade-lift-r" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-lift-r-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Lift G</span>
+                    <input id="grade-lift-g" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-lift-g-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Lift B</span>
+                    <input id="grade-lift-b" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-lift-b-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Gamma R</span>
+                    <input id="grade-gamma-r" type="range" min="0.1" max="3" step="0.01" value="1" />
+                    <output id="grade-gamma-r-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Gamma G</span>
+                    <input id="grade-gamma-g" type="range" min="0.1" max="3" step="0.01" value="1" />
+                    <output id="grade-gamma-g-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Gamma B</span>
+                    <input id="grade-gamma-b" type="range" min="0.1" max="3" step="0.01" value="1" />
+                    <output id="grade-gamma-b-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Gain R</span>
+                    <input id="grade-gain-r" type="range" min="0" max="3" step="0.01" value="1" />
+                    <output id="grade-gain-r-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Gain G</span>
+                    <input id="grade-gain-g" type="range" min="0" max="3" step="0.01" value="1" />
+                    <output id="grade-gain-g-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Gain B</span>
+                    <input id="grade-gain-b" type="range" min="0" max="3" step="0.01" value="1" />
+                    <output id="grade-gain-b-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Saturación</span>
+                    <input id="grade-saturation" type="range" min="0" max="2" step="0.01" value="1" />
+                    <output id="grade-saturation-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Contraste</span>
+                    <input id="grade-contrast" type="range" min="0" max="2" step="0.01" value="1" />
+                    <output id="grade-contrast-val">1</output>
+                  </div>
+                  <label class="checkbox-row"><input id="grade-invert" type="checkbox" /> Invertir</label>
+                  <div class="toolbar-inline" style="margin-top: 0.5rem; gap: 0.4rem">
+                    <button id="apply-grade" type="button" class="primary">Aplicar</button>
+                    <button id="reset-grade" type="button">Restablecer</button>
+                  </div>
+                  <p class="hint-inline">
+                    Corrección real por canal (fórmula ASC CDL). La previsualización se actualiza mientras
+                    arrastras; el clip solo guarda los valores al pulsar «Aplicar».
+                  </p>
+                </div>
+              </details>
+
+              <details class="sub-section" id="chroma-sub">
+                <summary>Croma</summary>
+                <div class="sub-section-body">
+                  <label class="checkbox-row"><input id="chroma-enabled" type="checkbox" /> Activar croma</label>
+                  <label>Color <input id="chroma-color" type="color" value="#00ff00" /></label>
+                  <div class="slider-row">
+                    <span>Similitud</span>
+                    <input id="chroma-similarity" type="range" min="0" max="1" step="0.01" value="0.4" />
+                    <output id="chroma-similarity-val">0.40</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Suavizado</span>
+                    <input id="chroma-smoothness" type="range" min="0.01" max="1" step="0.01" value="0.1" />
+                    <output id="chroma-smoothness-val">0.10</output>
+                  </div>
+                  <button id="apply-chroma" type="button" class="primary" style="margin-top: 0.5rem">Aplicar croma</button>
+                  <p class="hint-inline">
+                    Solo se compone sobre la pista de abajo en la EXPORTACIÓN — la previsualización muestra el
+                    recorte sobre negro (limitación del motor de reproducción, no un fallo).
+                  </p>
+                </div>
+              </details>
             </fieldset>
           </div>
         </details>
@@ -126,21 +278,47 @@
           </div>
         </details>
 
+        <details class="panel-section" id="master-audio-details">
+          <summary><h2>Máster de audio</h2></summary>
+          <div class="panel-section-body">
+            <fieldset id="master-audio-controls" disabled style="border: none; padding: 0; margin: 0">
+              <label class="checkbox-row"
+                ><input id="master-audio-enabled" type="checkbox" /> Activar EQ + compresión del máster</label
+              >
+              <div class="field-group">
+                <span class="field-group-label">Ecualizador (dB)</span>
+                <div class="field-grid field-grid-3">
+                  <label>Graves <input id="master-eq-low" type="number" step="1" min="-12" max="12" value="0" /></label>
+                  <label>Medios <input id="master-eq-mid" type="number" step="1" min="-12" max="12" value="0" /></label>
+                  <label>Agudos <input id="master-eq-high" type="number" step="1" min="-12" max="12" value="0" /></label>
+                </div>
+              </div>
+              <div class="field-group">
+                <span class="field-group-label">Compresor</span>
+                <div class="field-grid">
+                  <label>Cantidad (0-100) <input id="master-compression-amount" type="number" step="1" min="0" max="100" value="0" /></label>
+                  <label>Ganancia comp. (dB) <input id="master-makeup-gain" type="number" step="1" min="-12" max="12" value="0" /></label>
+                </div>
+                <p class="hint-inline">La cantidad ajusta a la vez el umbral y el ratio del compresor — ver core/timeline.ts.</p>
+              </div>
+              <button id="apply-master-audio" type="button" class="primary">Aplicar máster de audio</button>
+            </fieldset>
+          </div>
+        </details>
+
         <details class="panel-section" id="markers-details">
           <summary><h2>Marcadores</h2></summary>
           <div class="panel-section-body">
-            <button id="add-marker-button" type="button" disabled title="Añadir marcador en el playhead (M)">
-              🏳 Añadir marcador (M)
-            </button>
+            <p class="hint-inline">Añade marcadores con el botón de marcador de la barra de la línea de tiempo, o con la tecla <kbd>M</kbd>.</p>
             <ul id="marker-list" class="marker-list"></ul>
           </div>
         </details>
 
-        <details class="panel-section" id="text-details">
+        <details class="panel-section" id="text-details" hidden>
           <summary><h2>Texto</h2></summary>
           <div class="panel-section-body">
             <p id="text-editor-empty-hint" class="hint-inline">
-              Pulsa 🔤 (junto a la línea de tiempo) para añadir un texto, o selecciona uno para editarlo.
+              Pulsa el icono de texto (junto a la línea de tiempo) para añadir uno, o selecciona uno para editarlo.
             </p>
             <fieldset id="text-editor" hidden style="border: none; padding: 0; margin: 0">
               <div class="field-group">
@@ -177,7 +355,7 @@
                 </div>
                 <p class="hint-inline">Arrastra en el preview para mover · arrastra el asa de arriba para rotar.</p>
               </div>
-              <button id="delete-text-button" type="button">🗑 Eliminar (Supr)</button>
+              <button id="delete-text-button" type="button"><span data-icon="trash"></span> Eliminar (Supr)</button>
             </fieldset>
             <ul id="text-overlay-list" class="marker-list"></ul>
           </div>
@@ -209,69 +387,58 @@
             </div>
             <button id="export-button" type="button" disabled class="primary">Exportar a MP4</button>
             <button id="cancel-export-button" type="button" hidden>Cancelar exportación</button>
+            <progress id="export-progress" hidden max="100" value="0"></progress>
             <p id="export-status"></p>
             <p id="export-download"></p>
-          </div>
-        </details>
-
-        <details class="panel-section" id="shortcuts-details">
-          <summary><h2>Atajos de teclado</h2></summary>
-          <div class="panel-section-body">
-            <ul class="shortcuts">
-              <li><span>Reproducir / Pausa</span><kbd>Espacio</kbd></li>
-              <li><span>Cortar en el playhead</span><kbd>C</kbd></li>
-              <li><span>Añadir marcador</span><kbd>M</kbd></li>
-              <li><span>Eliminar clip o texto seleccionado</span><kbd>Supr</kbd></li>
-              <li><span>Fotograma anterior / siguiente</span><kbd>←</kbd> <kbd>→</kbd></li>
-              <li><span>Ir al inicio / final</span><kbd>Inicio</kbd> <kbd>Fin</kbd></li>
-              <li><span>Deshacer / Rehacer</span><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></li>
-              <li><span>Zoom en la línea de tiempo</span><kbd>Ctrl</kbd>+<kbd>rueda</kbd></li>
-              <li><span>Desplazar la línea de tiempo</span><kbd>Shift</kbd>+<kbd>rueda</kbd></li>
-            </ul>
           </div>
         </details>
       </aside>
      </div>
 
-      <div class="timeline-section">
+      <div id="main-vertical-resize" class="main-vertical-resize" title="Arrastra para cambiar el espacio de la línea de tiempo"></div>
+
+      <div class="timeline-section" id="timeline-section">
         <div class="timeline-toolbar">
-          <select id="transition-type" title="Tipo de transición">
-            <option value="crossfade">Fundido cruzado</option>
-            <option value="dipToBlack">Fundido a negro</option>
-          </select>
-          <label class="toolbar-inline"
-            >Duración transición (s) <input id="transition-duration" type="number" step="0.1" min="0.1" value="0.5"
-          /></label>
-          <button id="add-video-track-button" type="button" disabled title="Añadir una pista de vídeo">
-            + Pista de vídeo
-          </button>
-          <button id="add-audio-track-button" type="button" disabled title="Añadir una pista de audio">
-            + Pista de audio
-          </button>
+          <div class="tl-group" role="group" aria-label="Herramientas">
+            <button id="select-clip-button" class="tl-btn" type="button" disabled title="Seleccionar el clip que hay en el playhead (A)">
+              <span data-icon="mousePointer"></span>
+            </button>
+            <button id="split-button" class="tl-btn" type="button" disabled title="Cortar en el playhead (C)">
+              <span data-icon="scissors"></span>
+            </button>
+            <button id="snap-toggle-button" class="tl-btn" type="button" disabled title="Imán / snapping a bordes y marcadores (N)">
+              <span data-icon="magnet"></span>
+            </button>
+            <button id="flag-clip-button" class="tl-btn" type="button" disabled title="Bandera en el clip seleccionado (G)">
+              <span data-icon="flag"></span>
+            </button>
+            <button id="add-marker-button" class="tl-btn" type="button" disabled title="Marcador en el playhead (M)">
+              <span data-icon="bookmark"></span>
+            </button>
+          </div>
+
           <span class="spacer"></span>
-          <button id="zoom-out-button" type="button" disabled title="Alejar">− Zoom</button>
-          <button id="zoom-fit-button" type="button" disabled title="Ajustar a la ventana">Ajustar</button>
-          <button id="zoom-in-button" type="button" disabled title="Acercar">+ Zoom</button>
+
+          <label class="master-volume" title="Volumen de la previsualización — no afecta al MP4 exportado ni al volumen de cada clip">
+            <span data-icon="volume2"></span>
+            <input id="master-volume" type="range" min="0" max="1" step="0.01" value="1" />
+          </label>
+
+          <!-- Controles que salieron de la barra (viven en el menú Editar / Pista / Ver
+               y en sus atajos). Se mantienen en el DOM porque el menú los activa con
+               .click() y ui/main.ts referencia sus ids. -->
+          <div hidden>
+            <button id="delete-clip-button" type="button" disabled>Eliminar clip</button>
+            <button id="add-text-button" type="button" disabled>Añadir texto</button>
+            <button id="insert-transition-button" type="button" disabled>Transición</button>
+            <button id="add-video-track-button" type="button" disabled>Pista de vídeo</button>
+            <button id="add-audio-track-button" type="button" disabled>Pista de audio</button>
+            <button id="zoom-out-button" type="button" disabled>Alejar</button>
+            <button id="zoom-fit-button" type="button" disabled>Ajustar</button>
+            <button id="zoom-in-button" type="button" disabled>Acercar</button>
+          </div>
         </div>
         <div class="timeline-body">
-          <div class="timeline-tools">
-            <button id="select-clip-button" type="button" disabled title="Seleccionar el clip que hay en el playhead">
-              🖱
-            </button>
-            <button id="split-button" type="button" disabled title="Cortar en el playhead (C)">✂</button>
-            <button id="delete-clip-button" type="button" disabled title="Eliminar clip seleccionado (Supr)">
-              🗑
-            </button>
-            <button
-              id="insert-transition-button"
-              type="button"
-              disabled
-              title="Insertar una transición después del clip seleccionado"
-            >
-              ⇄
-            </button>
-            <button id="add-text-button" type="button" disabled title="Añadir un texto en el playhead">🔤</button>
-          </div>
           <div id="timeline-scroll" class="timeline-scroll">
             <div id="timeline-content" class="timeline-content">
               <div id="timeline-ruler" class="timeline-ruler"></div>
@@ -285,6 +452,29 @@
     </main>
 
     <div id="scrub-tooltip" class="scrub-tooltip" hidden></div>
+
+    <dialog id="shortcuts-modal">
+      <div class="modal-header">
+        <h2>Atajos de teclado</h2>
+        <button id="close-shortcuts-modal" type="button" class="modal-close" data-icon="x" title="Cerrar"></button>
+      </div>
+      <ul class="shortcuts">
+        <li><span>Reproducir / Pausa</span><kbd>Espacio</kbd></li>
+        <li><span>Shuttle: reproducir / parar / fotograma atrás</span><kbd>L</kbd> <kbd>K</kbd> <kbd>J</kbd></li>
+        <li><span>Recortar con ripple (desplaza el resto de la pista)</span><kbd>Mayús</kbd>+arrastre</li>
+        <li><span>Seleccionar clip en el playhead</span><kbd>A</kbd></li>
+        <li><span>Cortar en el playhead</span><kbd>C</kbd></li>
+        <li><span>Imán / snapping (on/off)</span><kbd>N</kbd></li>
+        <li><span>Bandera en el clip seleccionado</span><kbd>G</kbd></li>
+        <li><span>Añadir marcador</span><kbd>M</kbd></li>
+        <li><span>Eliminar clip o texto seleccionado</span><kbd>Supr</kbd></li>
+        <li><span>Fotograma anterior / siguiente</span><kbd>←</kbd> <kbd>→</kbd></li>
+        <li><span>Ir al inicio / final</span><kbd>Inicio</kbd> <kbd>Fin</kbd></li>
+        <li><span>Deshacer / Rehacer</span><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></li>
+        <li><span>Zoom en la línea de tiempo</span><kbd>Ctrl</kbd>+<kbd>rueda</kbd></li>
+        <li><span>Desplazar la línea de tiempo</span><kbd>Shift</kbd>+<kbd>rueda</kbd></li>
+      </ul>
+    </dialog>
 
     <script type="module" src="/ui/main.ts"></script>
   </body>

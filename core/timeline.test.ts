@@ -9,32 +9,43 @@ import {
   audioTailCutTicks,
   clipDurationTicks,
   clipEndTicks,
+  compressorParamsFromAmount,
   createTransition,
   effectiveClipVolume,
   insertClip,
+  isNeutralColorGrade,
   moveClipTo,
   moveTrack,
   moveVolumeKeyframe,
   neighborsOfTransition,
+  NEUTRAL_MASTER_AUDIO,
   nextVideoContentTicks,
   removeClip,
   removeTrack,
   removeVolumeKeyframe,
   renameTrack,
   resolveActiveVideoPosition,
+  resolveActiveVideoPositionBelow,
   setClipAudio,
+  setClipChromaKey,
   setClipColorFilter,
+  setClipFlagged,
+  setClipColorGrade,
   setClipVideoHidden,
+  setMasterAudio,
   setTrackHidden,
   splitClipAt,
   timelineDurationTicks,
   trackDurationTicks,
   transitionAudioCues,
   trimClipIn,
+  trimClipInRipple,
   trimClipOut,
+  trimClipOutRipple,
   volumeAtOffsetTicks,
   volumeAutomationFrom,
 } from "./timeline";
+import { NEUTRAL_CHROMA_KEY, NEUTRAL_COLOR_GRADE } from "./types";
 import type { Clip, Timeline, Track } from "./types";
 
 function clip(id: string, sourceId: string, startSec: number, inSec: number, outSec: number): Clip {
@@ -218,6 +229,36 @@ describe("composición multipista (capas opacas)", () => {
       outputFrameRate: { numerator: 30, denominator: 1 },
     };
     expect(resolveActiveVideoPosition(timeline, secondsToTicks(1))).toBeNull();
+  });
+});
+
+describe("resolveActiveVideoPositionBelow", () => {
+  function twoVideoTrackTimeline(): Timeline {
+    return {
+      tracks: [
+        { id: "bottom", kind: "video", hidden: false, clips: [clip("a", "source-a", 0, 0, 3)] },
+        { id: "top", kind: "video", hidden: false, clips: [clip("b", "source-b", 1, 0, 1)] },
+      ],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+  }
+
+  it("encuentra la pista con contenido inmediatamente debajo del índice dado", () => {
+    const timeline = twoVideoTrackTimeline();
+    const pos = resolveActiveVideoPositionBelow(timeline, secondsToTicks(1.5), 1);
+    expect(pos!.trackId).toBe("bottom");
+    expect(pos!.sourceId).toBe("source-a");
+  });
+
+  it("null si no hay ninguna pista de vídeo por debajo del índice dado", () => {
+    const timeline = twoVideoTrackTimeline();
+    expect(resolveActiveVideoPositionBelow(timeline, secondsToTicks(1.5), 0)).toBeNull();
+  });
+
+  it("null si la pista de debajo no tiene contenido en ese instante", () => {
+    const timeline = twoVideoTrackTimeline();
+    expect(resolveActiveVideoPositionBelow(timeline, secondsToTicks(5), 1)).toBeNull();
   });
 });
 
@@ -474,6 +515,59 @@ describe("trimClipIn / trimClipOut", () => {
   });
 });
 
+describe("trimClipInRipple / trimClipOutRipple", () => {
+  const minDuration = secondsToTicks(0.1);
+
+  /** Tres clips pegados sin huecos: "a" (0-2s), "b" (2-5s), "c" (5-7s). */
+  function threeClipTimeline(): Timeline {
+    return {
+      tracks: [
+        {
+          id: "video-1",
+          kind: "video",
+          hidden: false,
+          clips: [clip("a", "source-a", 0, 0, 2), clip("b", "source-b", 2, 0, 3), clip("c", "source-c", 5, 0, 2)],
+        },
+      ],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+  }
+
+  it("trimClipOutRipple alargando un clip desplaza a los siguientes sin dejar hueco", () => {
+    const timeline = threeClipTimeline();
+    const next = trimClipOutRipple(timeline, "video-1", "a", secondsToTicks(3), minDuration);
+    const [a, b, c] = next.tracks[0]!.clips;
+    expect(a!.sourceOutTicks).toBe(secondsToTicks(3));
+    expect(b!.startTicks).toBe(secondsToTicks(3));
+    expect(c!.startTicks).toBe(secondsToTicks(6));
+  });
+
+  it("trimClipOutRipple acortando un clip cierra el hueco desplazando a los siguientes hacia atrás", () => {
+    const timeline = threeClipTimeline();
+    const next = trimClipOutRipple(timeline, "video-1", "a", secondsToTicks(1), minDuration);
+    const [a, b, c] = next.tracks[0]!.clips;
+    expect(a!.sourceOutTicks).toBe(secondsToTicks(1));
+    expect(b!.startTicks).toBe(secondsToTicks(1));
+    expect(c!.startTicks).toBe(secondsToTicks(4));
+  });
+
+  it("trimClipInRipple desplaza a los siguientes sin tocar a los anteriores", () => {
+    const timeline = threeClipTimeline();
+    const next = trimClipInRipple(timeline, "video-1", "b", secondsToTicks(1), minDuration);
+    const [a, b, c] = next.tracks[0]!.clips;
+    expect(a!.startTicks).toBe(0); // el clip anterior nunca se toca
+    expect(b!.sourceInTicks).toBe(secondsToTicks(1));
+    expect(b!.startTicks).toBe(secondsToTicks(2)); // el propio clip no se desplaza a sí mismo
+    expect(c!.startTicks).toBe(secondsToTicks(4)); // duración de b: 3s → 2s, delta -1s
+  });
+
+  it("trimClipOutRipple sigue respetando la duración mínima", () => {
+    const timeline = threeClipTimeline();
+    expect(() => trimClipOutRipple(timeline, "video-1", "a", secondsToTicks(0.05), minDuration)).toThrow(RangeError);
+  });
+});
+
 describe("setClipAudio / effectiveClipVolume", () => {
   it("actualiza volumen y muted del clip indicado, sin tocar los demás", () => {
     const timeline = twoClipTimeline();
@@ -541,6 +635,26 @@ describe("videoHidden no afecta al audio (allAudioSchedules)", () => {
     expect(schedule).toBeDefined();
     expect(schedule!.sourceId).toBe("source-a");
     expect(schedule!.durationTicks).toBe(secondsToTicks(2));
+  });
+});
+
+describe("setClipFlagged", () => {
+  it("marca la bandera del clip indicado, sin tocar los demás", () => {
+    const timeline = twoClipTimeline();
+    const next = setClipFlagged(timeline, "video-1", "a", true);
+    const [a, b] = next.tracks[0]!.clips;
+    expect(a!.flagged).toBe(true);
+    expect(b!.flagged).toBeUndefined();
+  });
+
+  it("con false quita el campo, no lo deja en false", () => {
+    const flagged = setClipFlagged(twoClipTimeline(), "video-1", "a", true);
+    const cleared = setClipFlagged(flagged, "video-1", "a", false);
+    expect(cleared.tracks[0]!.clips[0]!.flagged).toBeUndefined();
+  });
+
+  it("lanza con un clipId inexistente", () => {
+    expect(() => setClipFlagged(twoClipTimeline(), "video-1", "no-existe", true)).toThrow(RangeError);
   });
 });
 
@@ -866,5 +980,64 @@ describe("allAudioSchedules", () => {
       outputFrameRate: { numerator: 30, denominator: 1 },
     };
     expect(allAudioSchedules(timeline, secondsToTicks(2))).toEqual([]);
+  });
+});
+
+describe("setClipColorGrade / setClipChromaKey / isNeutralColorGrade", () => {
+  it("NEUTRAL_COLOR_GRADE es neutro por definición", () => {
+    expect(isNeutralColorGrade(NEUTRAL_COLOR_GRADE)).toBe(true);
+  });
+
+  it("cualquier campo distinto de neutro deja de ser neutro", () => {
+    expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, liftR: 0.1 })).toBe(false);
+    expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, invert: true })).toBe(false);
+  });
+
+  it("setClipColorGrade aplica y quita (undefined) el grading de un clip sin tocar los demás", () => {
+    const timeline = twoClipTimeline();
+    const grade = { ...NEUTRAL_COLOR_GRADE, saturation: 0.5 };
+    const graded = setClipColorGrade(timeline, "video-1", "a", grade);
+    expect(graded.tracks[0]!.clips.find((c) => c.id === "a")!.colorGrade).toEqual(grade);
+    expect(graded.tracks[0]!.clips.find((c) => c.id === "b")!.colorGrade).toBeUndefined();
+    const cleared = setClipColorGrade(graded, "video-1", "a", undefined);
+    expect(cleared.tracks[0]!.clips.find((c) => c.id === "a")!.colorGrade).toBeUndefined();
+  });
+
+  it("setClipChromaKey aplica y quita (undefined) el croma de un clip", () => {
+    const timeline = twoClipTimeline();
+    const key = { ...NEUTRAL_CHROMA_KEY, enabled: true };
+    const keyed = setClipChromaKey(timeline, "video-1", "a", key);
+    expect(keyed.tracks[0]!.clips.find((c) => c.id === "a")!.chromaKey).toEqual(key);
+    const cleared = setClipChromaKey(keyed, "video-1", "a", undefined);
+    expect(cleared.tracks[0]!.clips.find((c) => c.id === "a")!.chromaKey).toBeUndefined();
+  });
+});
+
+describe("máster de audio", () => {
+  it("compressorParamsFromAmount(0) no comprime (umbral 0dB, ratio 1)", () => {
+    expect(compressorParamsFromAmount(0)).toEqual({ thresholdDb: 0, ratio: 1 });
+  });
+
+  it("compressorParamsFromAmount(100) es la compresión máxima (umbral -30dB, ratio 12)", () => {
+    expect(compressorParamsFromAmount(100)).toEqual({ thresholdDb: -30, ratio: 12 });
+  });
+
+  it("compressorParamsFromAmount satura fuera de [0,100]", () => {
+    expect(compressorParamsFromAmount(-10)).toEqual({ thresholdDb: 0, ratio: 1 });
+    expect(compressorParamsFromAmount(150)).toEqual({ thresholdDb: -30, ratio: 12 });
+  });
+
+  it("setMasterAudio reemplaza masterAudio sin tocar el resto de la timeline", () => {
+    const track: Track = { id: "video-1", kind: "video", hidden: false, clips: [] };
+    const timeline: Timeline = {
+      tracks: [track],
+      outputResolution: { width: 1920, height: 1080 },
+      outputFrameRate: { numerator: 30, denominator: 1 },
+    };
+    const master = { ...NEUTRAL_MASTER_AUDIO, enabled: true, eqLowDb: 3 };
+    const updated = setMasterAudio(timeline, master);
+    expect(updated.masterAudio).toEqual(master);
+    expect(updated.tracks).toBe(timeline.tracks);
+    expect(timeline.masterAudio).toBeUndefined(); // pura: no muta el original
   });
 });

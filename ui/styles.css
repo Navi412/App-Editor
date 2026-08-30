@@ -1,18 +1,33 @@
 :root {
-  color-scheme: dark;
-  --bg: #1b1d23;
-  --panel: #24262e;
-  --panel-alt: #2c2f39;
-  --border: #3a3d48;
-  --accent: #4f8cff;
-  --accent-soft: #375a99;
-  --text: #e6e6ea;
-  --text-dim: #9a9da8;
-  --danger: #ff5f5f;
+  /* `only light`: además de fijar el esquema, le pide al navegador que
+     NO aplique su modo oscuro automático (force-dark) sobre este diseño,
+     que está pensado a propósito en claro. */
+  color-scheme: only light;
+  /* Tema claro + glass: los paneles son cristal translúcido sobre un
+     fondo con degradado suave (ver body / body::before) que le da algo
+     que difuminar al backdrop-filter. El área de preview de vídeo es
+     una isla oscura a propósito (referencia de color neutra). */
+  --bg: #e9ecf3;
+  --panel: rgba(255, 255, 255, 0.55);
+  --panel-alt: rgba(255, 255, 255, 0.78);
+  --glass-solid: #f6f7fb;
+  --border: rgba(18, 27, 45, 0.1);
+  --border-strong: rgba(18, 27, 45, 0.18);
+  --accent: #2f6bff;
+  --accent-soft: rgba(47, 107, 255, 0.14);
+  --accent-strong: #2258e6;
+  --text: #1c2230;
+  --text-dim: #616d80;
+  --danger: #e5484d;
   --playhead: #ff3b3b;
-  --clip: #2e4a72;
-  --clip-selected: #3e6bab;
-  --radius: 4px;
+  --clip: #4c78d8;
+  --clip-selected: #3a5fc4;
+  --lane: rgba(255, 255, 255, 0.42);
+  --lane-audio: rgba(255, 255, 255, 0.26);
+  --shadow-panel: 0 6px 24px rgba(18, 27, 45, 0.1);
+  --shadow-pop: 0 14px 40px rgba(18, 27, 45, 0.22);
+  --glass-blur: saturate(180%) blur(20px);
+  --radius: 8px;
   /* Ancho del gutter de cada pista (nombre/ojo-mute/quitar) — debe
      coincidir con TRACK_GUTTER_WIDTH_PX en ui/main.ts. La regla de
      segundos, los marcadores, el playhead y la pista de texto reservan
@@ -25,6 +40,31 @@
   box-sizing: border-box;
 }
 
+/* Manchas de color muy tenues fijas al viewport — no se ven casi de
+   frente, pero el backdrop-filter de los paneles de cristal las recoge
+   y les da vida (el efecto glass sobre un fondo plano es invisible). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(38% 44% at 12% 10%, rgba(97, 140, 255, 0.22), transparent 70%),
+    radial-gradient(42% 50% at 88% 88%, rgba(255, 138, 196, 0.18), transparent 72%),
+    radial-gradient(34% 40% at 70% 12%, rgba(120, 220, 200, 0.14), transparent 70%);
+}
+
+/* Cualquier regla nuestra que fije `display` en un elemento (p.ej.
+   `button { display: inline-flex }`, `.drop-zone { display: flex }`)
+   pisa la regla `[hidden] { display: none }` del navegador — los
+   estilos de autor siempre ganan a los de user-agent, sea cual sea la
+   especificidad. Sin este `!important` un `<button hidden>` o
+   `.drop-zone` con `.hidden = true` seguiría mostrándose. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -32,9 +72,11 @@ body {
 
 body {
   margin: 0;
-  background: var(--bg);
+  background:
+    linear-gradient(135deg, #e6ecf7 0%, #eceef4 45%, #f1ecf6 100%) fixed,
+    var(--bg);
   color: var(--text);
-  font: 13px/1.4 -apple-system, "Segoe UI", sans-serif;
+  font: 13px/1.45 -apple-system, "Segoe UI", sans-serif;
   /* Todo el editor (cabecera + preview/panel + línea de tiempo) vive
      dentro de una viewport, sin scroll de página: la línea de tiempo
      tiene que verse siempre sin bajar. Cada zona que necesite su
@@ -49,10 +91,14 @@ header {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.6rem 1rem;
-  background: var(--panel);
+  gap: 0.9rem;
+  padding: 0.5rem 1rem;
+  background: var(--panel-alt);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset;
+  z-index: 10;
 }
 
 header h1 {
@@ -62,6 +108,22 @@ header h1 {
   white-space: nowrap;
 }
 
+/* Agrupa botones relacionados (archivo / historial / proyecto) con un
+   separador fino entre grupos, en vez de una fila plana de botones sin
+   jerarquía — pedido explícito del 2026-08-29. */
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--border);
+}
+
+.toolbar-group:first-of-type {
+  padding-left: 0;
+  border-left: none;
+}
+
 header .hint {
   color: var(--text-dim);
   font-size: 12px;
@@ -69,38 +131,169 @@ header .hint {
   white-space: nowrap;
 }
 
-button {
-  background: var(--panel-alt);
+@media (max-width: 1180px) {
+  header .hint {
+    display: none;
+  }
+}
+
+.help-button {
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.help-button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* --- Menú de aplicación (☰) ---
+   En Electron hay barra de menú nativa (ver electron/main.cjs) y este
+   botón se oculta desde ui/main.ts. En el navegador es la única vía a
+   Archivo/Editar/Ver/Pista: abre un desplegable construido desde el
+   mismo listado de acciones (APP_MENU en ui/main.ts). */
+.app-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.app-menu-button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  justify-content: center;
+}
+
+.app-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  min-width: 240px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 0.3rem;
+  background: var(--glass-solid);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.app-menu-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  padding: 0.5rem 0.6rem 0.25rem;
+}
+
+.app-menu-group-label:first-child {
+  padding-top: 0.25rem;
+}
+
+.app-menu-item {
+  width: 100%;
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+  padding: 0.4rem 0.6rem;
+}
+
+.app-menu-item:hover:not(:disabled) {
+  background: rgba(47, 107, 255, 0.1);
+  border-color: transparent;
+}
+
+.app-menu-item:disabled {
+  opacity: 0.4;
+}
+
+.project-name {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.project-name::before {
+  content: "— ";
+}
+
+button,
+.button-like {
+  background: rgba(255, 255, 255, 0.7);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0.35rem 0.7rem;
   font-size: 12px;
+  min-height: 28px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease;
 }
 
-button:hover:not(:disabled) {
-  background: var(--accent-soft);
+button:hover:not(:disabled),
+.button-like:hover {
+  background: #fff;
   border-color: var(--accent);
 }
 
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Icono propio (ui/icons.ts) en vez de emoji — trazo uniforme en todos
+   los botones, tamaño base 14px salvo donde se pide uno mayor. */
+.icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
 button:disabled {
-  opacity: 0.4;
+  opacity: 0.45;
   cursor: default;
 }
 
 button.primary {
-  background: var(--accent-soft);
-  border-color: var(--accent);
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(47, 107, 255, 0.28);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 
 input[type="number"],
+input[type="text"],
 input[type="file"] {
-  background: var(--panel-alt);
+  background: rgba(255, 255, 255, 0.85);
   color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
   font-size: 12px;
 }
 
@@ -108,12 +301,19 @@ input[type="number"] {
   width: 5.5rem;
 }
 
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 select {
-  background: var(--panel-alt);
+  background: rgba(255, 255, 255, 0.85);
   color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
   font-size: 12px;
 }
 
@@ -122,8 +322,8 @@ main {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  background: var(--border);
+  gap: 0;
+  background: transparent;
   overflow: hidden;
 }
 
@@ -131,7 +331,7 @@ main {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
-  gap: 1px;
+  gap: 0;
   overflow: hidden;
 }
 
@@ -141,18 +341,23 @@ main {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  padding: 0.75rem 1rem;
+  background: transparent;
+  padding: 1rem 1.25rem;
 }
 
 .preview-canvas-wrap {
   flex: 1 1 auto;
+  width: 100%;
   min-height: 0;
   display: flex;
   justify-content: center;
   align-items: center;
-  background: #000;
-  border: 1px solid var(--border);
+  /* Isla oscura a propósito: el vídeo se juzga mejor sobre un entorno
+     neutro, no sobre el cristal claro del resto de la app. */
+  background: #0b0d12;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
 }
 
 #preview {
@@ -183,10 +388,13 @@ main {
 }
 
 .side-panel {
-  flex: 0 0 260px;
+  flex: 0 0 288px;
   min-height: 0;
   background: var(--panel);
-  padding: 0.75rem;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-left: 1px solid var(--border);
+  padding: 0.8rem;
   overflow-y: auto;
 }
 
@@ -206,7 +414,10 @@ main {
   flex: 0 0 200px;
   min-height: 0;
   background: var(--panel);
-  padding: 0.75rem;
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-right: 1px solid var(--border);
+  padding: 0.8rem;
   overflow-y: auto;
 }
 
@@ -219,7 +430,7 @@ main {
 }
 
 .effect-folder {
-  background: var(--panel-alt);
+  background: rgba(255, 255, 255, 0.62);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-bottom: 0.5rem;
@@ -231,6 +442,15 @@ main {
   font-size: 12px;
   font-weight: 600;
   padding: 0.15rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.effect-folder summary .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-dim);
 }
 
 .effect-folder-body {
@@ -242,8 +462,9 @@ main {
 
 .effect-chip {
   text-align: left;
+  justify-content: flex-start;
   cursor: grab;
-  background: var(--panel);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .effect-chip:active {
@@ -253,20 +474,22 @@ main {
 /* --- Secciones plegables del panel lateral: cada una es su propia "tarjeta", para que se lean como compartimentos separados en vez de un único bloque largo. --- */
 
 .panel-section {
-  background: var(--panel-alt);
+  background: rgba(255, 255, 255, 0.66);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-bottom: 0.6rem;
+  box-shadow: var(--shadow-panel);
 }
 
 .panel-section > summary {
   list-style: none;
   cursor: pointer;
-  padding: 0.55rem 0.75rem;
+  padding: 0.6rem 0.8rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
   user-select: none;
+  border-radius: var(--radius);
 }
 
 .panel-section > summary::-webkit-details-marker {
@@ -291,17 +514,17 @@ main {
 }
 
 .panel-section > summary:hover {
-  background: var(--panel);
+  background: rgba(255, 255, 255, 0.6);
 }
 
 .panel-section-body {
-  padding: 0.65rem 0.75rem 0.75rem;
+  padding: 0.9rem 0.95rem 1rem;
 }
 
 /* Grupo de campos relacionados dentro de una sección (p.ej. "Contenido"/"Estilo"/"Posición" del editor de texto) — una franja separadora fina entre grupos, sin caja propia, para no anidar demasiadas cajas dentro de la tarjeta. */
 .field-group {
-  padding-top: 0.6rem;
-  margin-top: 0.6rem;
+  padding-top: 0.95rem;
+  margin-top: 0.95rem;
   border-top: 1px solid var(--border);
 }
 
@@ -317,15 +540,15 @@ main {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-dim);
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.6rem;
 }
 
 /* Varios campos cortos uno junto a otro (Inicio/Fin, X/Y/Rotación...) en vez de apilados a lo largo — la principal queja de "demasiada información" era esta lista vertical interminable. */
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 0.4rem;
-  margin-bottom: 0.5rem;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
 }
 
 .field-grid.field-grid-3 {
@@ -336,7 +559,7 @@ main {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.2rem;
+  gap: 0.3rem;
   font-size: 11px;
   color: var(--text-dim);
 }
@@ -350,25 +573,110 @@ main {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.35rem;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.panel-section-body .field-grid label {
+  margin-bottom: 0;
 }
 
 .hint-inline {
   color: var(--text-dim);
   font-size: 11px;
-  margin: 0.35rem 0 0;
+  line-height: 1.5;
+  margin: 0.55rem 0 0;
 }
 
 .checkbox-row {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 0.4rem;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+  min-height: 22px;
 }
 
 .checkbox-row input[type="checkbox"] {
   margin: 0;
+  flex-shrink: 0;
+}
+
+/* --- Inspector contextual: el panel lateral muestra solo lo relevante a
+   la selección (clip / texto / proyecto). Ver renderInspector() en
+   ui/main.ts. --- */
+
+.inspector-hint {
+  margin: 0 0 0.6rem;
+  padding: 0.6rem 0.7rem;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+
+/* Subsección plegable DENTRO de una tarjeta del inspector (Grading,
+   Croma) — para poder colapsar los controles pesados sin sacarlos a su
+   propia tarjeta. */
+.sub-section {
+  margin-top: 0.95rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.sub-section > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  user-select: none;
+}
+
+.sub-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sub-section > summary::before {
+  content: "▸";
+  font-size: 9px;
+  transition: transform 0.15s ease;
+}
+
+.sub-section[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.sub-section-body {
+  padding-top: 0.7rem;
+}
+
+/* Fila etiqueta + slider + valor, para el grading/croma. */
+.slider-row {
+  display: grid;
+  grid-template-columns: 4.4rem 1fr 2.6rem;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.slider-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.slider-row output {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
 
 .shortcuts {
@@ -395,16 +703,47 @@ kbd {
   color: var(--text);
 }
 
-.timeline-section {
+/* Asa entre el preview/panel de arriba y la línea de tiempo de abajo —
+   arrastrar para dar más o menos alto a la línea de tiempo, pedido
+   explícito del 2026-08-29. Mismo patrón visual que .row-resize-handle
+   (el asa de altura de cada pista), pero horizontal y a nivel de toda
+   la sección. */
+.main-vertical-resize {
   flex: 0 0 auto;
-  background: var(--bg);
-  padding: 0.6rem 1rem 1rem;
+  height: 6px;
+  background: var(--border-strong);
+  cursor: ns-resize;
+}
+
+.main-vertical-resize:hover,
+.main-vertical-resize.dragging {
+  background: var(--accent);
+}
+
+.timeline-section {
+  /* Sin altura propia por defecto (flex:0 0 auto, como antes): crece
+     con el contenido hasta que el usuario arrastra
+     #main-vertical-resize (ver attachMainVerticalResizeHandle en
+     ui/main.ts), momento en que pasa a tener una altura fija en
+     píxeles — a partir de ahí son las filas de dentro (.timeline-body)
+     las que se encogen y ganan scroll propio en vez de que la sección
+     entera seguir creciendo sin límite. */
+  flex: 0 0 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-top: 1px solid var(--border);
+  padding: 0.55rem 1rem 1rem;
 }
 
 .timeline-toolbar {
+  flex: 0 0 auto;
   display: flex;
-  gap: 0.4rem;
-  margin-bottom: 0.4rem;
+  gap: 0.45rem;
+  margin-bottom: 0.5rem;
   align-items: center;
 }
 
@@ -426,37 +765,93 @@ kbd {
 }
 
 .timeline-body {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: stretch;
 }
 
-.timeline-tools {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  padding: 0.35rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-right: none;
-  flex-shrink: 0;
-}
-
-.timeline-tools button {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  font-size: 15px;
+/* Barra de la línea de tiempo reducida a lo esencial (pedido explícito
+   del 2026-08-30): 5 herramientas de una tecla + volumen de monitor.
+   El resto (borrar, texto, pistas, zoom, transición) vive en el menú. */
+.tl-group {
   display: flex;
   align-items: center;
+  gap: 0.35rem;
+}
+
+/* Botón "de una tecla" estilo NLE: icono, todos idénticos en tamaño y
+   forma; el título lleva el nombre y la tecla (A/C/N/G/M). */
+.tl-btn {
+  width: 34px;
+  height: 30px;
+  padding: 0;
   justify-content: center;
+}
+
+.tl-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Estado activo (hoy solo el imán N, que es un interruptor). */
+.tl-btn.is-active {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+
+.tl-btn.is-active:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+/* Volumen de monitor — deslizador general de la previsualización, no
+   toca el volumen por clip ni el MP4 exportado. */
+.master-volume {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.master-volume .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.master-volume input[type="range"] {
+  width: 150px;
+  accent-color: var(--accent);
+}
+
+/* Duración de transición, ahora en el panel de efectos (junto a los
+   chips que se arrastran). */
+.effect-duration {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.effect-duration input {
+  width: 100%;
 }
 
 .timeline-scroll {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-x: auto;
-  overflow-y: hidden;
-  border: 1px solid var(--border);
+  /* auto, no hidden: una vez que .timeline-section tiene una altura
+     fija (ver arriba), muchas pistas ya no caben todas a la vez —
+     necesitan su propio scroll vertical en vez de quedar recortadas. */
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.35);
 }
 
 .timeline-content {
@@ -468,8 +863,8 @@ kbd {
 
 .timeline-ruler {
   height: 18px;
-  background: var(--panel-alt);
-  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.7);
+  border-bottom: 1px solid var(--border-strong);
   cursor: pointer;
   position: relative;
 }
@@ -486,8 +881,8 @@ kbd {
   top: 0;
   bottom: 0;
   width: var(--track-gutter-width);
-  background: var(--panel);
-  border-right: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.55);
+  border-right: 1px solid var(--border-strong);
 }
 
 .timeline-ruler .ruler-mark {
@@ -516,7 +911,7 @@ kbd {
 }
 
 .timeline-track-group + .timeline-track-group {
-  border-top: 2px solid var(--border);
+  border-top: 2px solid var(--border-strong);
 }
 
 .timeline-track-row {
@@ -540,12 +935,12 @@ kbd {
   align-items: center;
   gap: 0.2rem;
   padding: 0 0.3rem;
-  background: var(--panel);
-  border-right: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+  border-right: 1px solid var(--border-strong);
 }
 
 .timeline-track-gutter--sub {
-  background: #14151a;
+  background: rgba(236, 239, 245, 0.72);
 }
 
 .timeline-track-gutter .track-name {
@@ -587,16 +982,69 @@ kbd {
 }
 
 .timeline-track-gutter button {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  font-size: 11px;
   line-height: 1;
   flex-shrink: 0;
+  justify-content: center;
+}
+
+.timeline-track-gutter .icon {
+  width: 14px;
+  height: 14px;
 }
 
 .timeline-track-gutter .track-toggle.is-off {
   opacity: 0.45;
+}
+
+/* --- Menú "⋮" del gutter (subir/bajar de capa, eliminar pista) —
+   agrupa 3 acciones poco usadas en un único botón en vez de 3 botones
+   sueltos siempre visibles, a petición explícita del 2026-08-29. --- */
+.track-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.track-menu-dropdown {
+  /* position/top/bottom/right los fija ui/main.ts en línea (ver
+     buildTrackMenu) — se añade a document.body con position:fixed
+     para escapar del overflow-y:hidden de #timeline-scroll. */
+  z-index: 10;
+  min-width: 160px;
+  background: var(--glass-solid);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.track-menu-dropdown button {
+  width: 100%;
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+  padding: 0.4rem 0.5rem;
+}
+
+.track-menu-dropdown button:hover:not(:disabled) {
+  background: rgba(47, 107, 255, 0.1);
+  border-color: transparent;
+}
+
+.track-menu-dropdown button.danger {
+  color: var(--danger);
+}
+
+.track-menu-dropdown button.danger:hover {
+  background: rgba(255, 95, 95, 0.12);
+  border-color: var(--danger);
 }
 
 /* Asa para cambiar la altura de ESTA fila (vídeo, su audio pegado, o
@@ -627,7 +1075,7 @@ kbd {
      attachRowResizeHandle en ui/main.ts (cada pista se redimensiona
      por separado, "lo que se quiera"). Estos valores son solo el
      respaldo antes de que JS la aplique. */
-  background: #101115;
+  background: var(--lane);
   cursor: pointer;
 }
 
@@ -637,7 +1085,7 @@ kbd {
 
 .timeline-track-lane--audio {
   height: 36px;
-  background: #0b0c0f;
+  background: var(--lane-audio);
 }
 
 .timeline-clip {
@@ -646,15 +1094,21 @@ kbd {
   height: 100%;
   min-width: 28px;
   background: var(--clip);
-  border-right: 1px solid #000;
+  border-right: 1px solid rgba(18, 27, 45, 0.25);
+  border-radius: 5px;
   padding: 4px 6px;
   overflow: hidden;
   cursor: grab;
-  color: var(--text);
+  color: #fff;
 }
 
 .timeline-clip:active {
   cursor: grabbing;
+}
+
+.timeline-clip:not(.selected):hover {
+  outline: 1px solid var(--text-dim);
+  outline-offset: -1px;
 }
 
 .timeline-clip.selected {
@@ -689,18 +1143,6 @@ kbd {
   color: var(--text-dim);
 }
 
-.timeline-clip .clip-remove {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 16px;
-  height: 16px;
-  line-height: 14px;
-  padding: 0;
-  font-size: 11px;
-  border-radius: 3px;
-}
-
 /* Una transición no es "un clip más" en la fila: se dibuja más baja,
    centrada verticalmente y con sombra propia para que se lea como un
    marcador que va POR ENCIMA del corte entre los dos clips vecinos, no
@@ -713,9 +1155,9 @@ kbd {
   border: 1px solid var(--accent);
   border-radius: 6px;
   outline: none;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 3px 12px rgba(18, 27, 45, 0.28);
   cursor: ew-resize;
-  background: repeating-linear-gradient(-45deg, #4a3a6b, #4a3a6b 6px, #3a2d55 6px, #3a2d55 12px);
+  background: repeating-linear-gradient(-45deg, #7b5cc4, #7b5cc4 6px, #6a4ab0 6px, #6a4ab0 12px);
 }
 
 .timeline-clip--transition:active {
@@ -729,6 +1171,12 @@ kbd {
    fiables de marcarlo visualmente) y con una etiqueta "solo audio". */
 .timeline-clip--video-hidden {
   opacity: 0.4;
+}
+
+/* Bandera del clip (tecla G) — franja superior de color, sin desplazar
+   el contenido (box-shadow, no border). */
+.timeline-clip--flagged {
+  box-shadow: inset 0 4px 0 #f5a623;
 }
 
 .timeline-clip--video-hidden::after {
@@ -745,19 +1193,19 @@ kbd {
 .timeline-clip--transition.selected {
   border-color: var(--text);
   box-shadow:
-    0 3px 10px rgba(0, 0, 0, 0.55),
+    0 3px 12px rgba(18, 27, 45, 0.28),
     0 0 0 2px var(--accent);
   /* .timeline-clip.selected pone un fondo azul plano con más especificidad
      que el degradado rayado de abajo — se repite aquí para no perder el
      patrón distintivo de "transición" al seleccionarla. */
-  background: repeating-linear-gradient(-45deg, #4a3a6b, #4a3a6b 6px, #3a2d55 6px, #3a2d55 12px);
+  background: repeating-linear-gradient(-45deg, #7b5cc4, #7b5cc4 6px, #6a4ab0 6px, #6a4ab0 12px);
 }
 
 .timeline-audio-cell {
   position: absolute;
   top: 0;
   height: 100%;
-  border-right: 1px solid #000;
+  border-right: 1px solid rgba(18, 27, 45, 0.18);
   overflow: hidden;
 }
 
@@ -768,24 +1216,27 @@ kbd {
 }
 
 .timeline-audio-cell.no-audio {
-  background: repeating-linear-gradient(45deg, #1a1b20, #1a1b20 4px, #16171b 4px, #16171b 8px);
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(18, 27, 45, 0.05),
+    rgba(18, 27, 45, 0.05) 4px,
+    rgba(18, 27, 45, 0.02) 4px,
+    rgba(18, 27, 45, 0.02) 8px
+  );
 }
 
 .timeline-audio-cell.has-volume {
   cursor: ns-resize;
 }
 
-.timeline-audio-cell .audio-remove {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  width: 14px;
-  height: 14px;
-  line-height: 12px;
-  padding: 0;
-  font-size: 10px;
-  border-radius: 3px;
-  z-index: 1;
+.timeline-audio-cell.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.timeline-audio-cell:not(.selected):hover {
+  outline: 1px solid var(--text-dim);
+  outline-offset: -1px;
 }
 
 .timeline-audio-cell .volume-line {
@@ -793,7 +1244,7 @@ kbd {
   left: 0;
   right: 0;
   height: 2px;
-  background: #ffb84f;
+  background: #e07a00;
   pointer-events: none;
   transform: translateY(-50%);
 }
@@ -808,9 +1259,10 @@ kbd {
   top: 1px;
   left: 3px;
   font-size: 9px;
-  color: #ffb84f;
+  font-weight: 600;
+  color: #c96a00;
   pointer-events: none;
-  text-shadow: 0 1px 1px #000;
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
 }
 
 .timeline-audio-cell.muted .volume-label {
@@ -827,7 +1279,7 @@ kbd {
 
 .volume-svg polyline {
   fill: none;
-  stroke: #ffb84f;
+  stroke: #e07a00;
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
 }
@@ -839,18 +1291,19 @@ kbd {
 
 .volume-point {
   position: absolute;
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: #ffb84f;
-  border: 1px solid #1b1d23;
+  background: #e07a00;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 3px rgba(18, 27, 45, 0.35);
   transform: translate(-50%, -50%);
   cursor: ns-resize;
   z-index: 2;
 }
 
 .volume-point:hover {
-  background: #ffd08a;
+  background: #f59021;
 }
 
 /* --- Pista de texto --- */
@@ -858,8 +1311,8 @@ kbd {
 .timeline-text-track {
   position: relative;
   height: 26px;
-  background: #14121a;
-  border-top: 1px solid var(--border);
+  background: rgba(123, 92, 196, 0.1);
+  border-top: 1px solid var(--border-strong);
 }
 
 .timeline-text-clip {
@@ -867,15 +1320,15 @@ kbd {
   top: 2px;
   bottom: 2px;
   min-width: 10px;
-  background: linear-gradient(180deg, #6b3f8f, #4a2d63);
-  border: 1px solid #000;
-  border-radius: 3px;
+  background: linear-gradient(180deg, #8a63c0, #6f4aae);
+  border: 1px solid rgba(18, 27, 45, 0.2);
+  border-radius: 4px;
   padding: 0 6px;
   overflow: hidden;
   cursor: grab;
   display: flex;
   align-items: center;
-  color: var(--text);
+  color: #fff;
 }
 
 .timeline-text-clip:active {
@@ -883,7 +1336,7 @@ kbd {
 }
 
 .timeline-text-clip.selected {
-  background: linear-gradient(180deg, #8a56b8, #6b3f8f);
+  background: linear-gradient(180deg, #9a72d0, #7d57bd);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -923,6 +1376,29 @@ kbd {
 
 #export-download a {
   color: var(--accent);
+}
+
+#export-progress {
+  display: block;
+  width: 100%;
+  height: 8px;
+  margin: 0.5rem 0 0.2rem;
+  appearance: none;
+  border: none;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+#export-progress::-webkit-progress-bar {
+  background: var(--panel);
+  border-radius: 999px;
+}
+
+#export-progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.15s ease;
 }
 
 .project-status {
@@ -989,10 +1465,69 @@ kbd {
   height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
-  border-top: 8px solid #ffb84f;
+  border-top: 8px solid #e07a00;
   cursor: pointer;
   transform: translateX(-5px);
   z-index: 3;
+}
+
+/* --- Bin de medios --- */
+
+.media-bin-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.media-bin-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.media-bin-item .media-bin-thumb {
+  width: 40px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  background-color: #101115;
+  background-size: cover;
+  background-position: center;
+}
+
+.media-bin-item .media-bin-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.media-bin-item .media-bin-name {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.media-bin-item .media-bin-meta {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.media-bin-item .media-bin-add {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  justify-content: center;
 }
 
 .marker-list {
@@ -1038,8 +1573,10 @@ kbd {
 
 .scrub-tooltip {
   position: fixed;
-  background: var(--panel-alt);
+  background: var(--glass-solid);
+  color: var(--text);
   border: 1px solid var(--accent);
+  box-shadow: var(--shadow-pop);
   border-radius: var(--radius);
   padding: 0.15rem 0.4rem;
   font-size: 11px;
@@ -1063,4 +1600,176 @@ kbd {
   max-height: none;
   width: auto;
   height: auto;
+}
+
+/* --- Zona de "suelta tu vídeo aquí" cuando no hay proyecto --- */
+
+.drop-zone {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  color: rgba(255, 255, 255, 0.75);
+  border: 2px dashed rgba(255, 255, 255, 0.35);
+  margin: 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.drop-zone .icon {
+  width: 32px;
+  height: 32px;
+}
+
+.drop-zone strong {
+  color: #fff;
+  font-size: 14px;
+}
+
+.drop-zone span {
+  font-size: 12px;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  color: #fff;
+  background: rgba(47, 107, 255, 0.16);
+}
+
+/* --- Modal de atajos de teclado (antes una sección fija del panel
+   lateral, movida a un diálogo bajo demanda — pedido explícito del
+   2026-08-29). `<dialog>` nativo: trae backdrop y cierre con Escape
+   gratis. --- */
+
+dialog#shortcuts-modal {
+  background: var(--panel-alt);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
+  padding: 1rem 1.1rem 1.1rem;
+  width: min(420px, 90vw);
+}
+
+dialog#shortcuts-modal::backdrop {
+  background: rgba(18, 27, 45, 0.35);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+.modal-header h2 {
+  font-size: 13px;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.modal-close {
+  background: transparent;
+  border-color: transparent;
+  padding: 0.2rem;
+}
+
+/* --- Mensajes transitorios ("toast" ligero, sin call-sites que tocar:
+   ver setStatusPill en ui/main.ts, que solo reinicia esta animación
+   cada vez que cambia el texto de #status) --- */
+
+#status {
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  transition: opacity 0.2s ease;
+}
+
+#status:empty {
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
+}
+
+@keyframes status-flash {
+  0% {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  100% {
+    border-color: var(--border-strong);
+    background: rgba(255, 255, 255, 0.85);
+  }
+}
+
+#status.flash {
+  animation: status-flash 1.2s ease-out;
+}
+
+/* --- Jerarquía de la regla de tiempo: marcas menores más finas y sin
+   etiqueta entre las marcas mayores, para leer la duración de un
+   vistazo — pedido explícito del 2026-08-29. --- */
+
+.timeline-ruler .ruler-mark.minor {
+  border-left-color: rgba(154, 157, 168, 0.3);
+  color: transparent;
+}
+
+/* --- Distinguir pistas de vídeo/audio a simple vista además de por la
+   forma de onda: una franja de color a juego con el tipo de icono
+   (ojo=vídeo, altavoz=audio) en el borde del gutter. --- */
+
+.timeline-track-gutter {
+  border-left: 3px solid transparent;
+}
+
+.timeline-track-row:has(.timeline-track-lane--video) .timeline-track-gutter {
+  border-left-color: var(--accent);
+}
+
+.timeline-track-row:has(.timeline-track-lane--audio) .timeline-track-gutter {
+  border-left-color: #e07a00;
+}
+
+/* --- Números tabulares: tiempos y duraciones no "bailan" de ancho al cambiar. --- */
+
+.clip-duration,
+input[type="number"],
+.field-grid input {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Que el panel lateral nunca quede invisible al estrechar la
+   ventana: se encoge hasta un mínimo razonable y a partir de ahí el
+   contenedor hace scroll horizontal en vez de recortar el panel fuera
+   de la vista (bug encontrado probando en una ventana estrecha, ver
+   nota del 2026-08-29). --- */
+
+.main-top {
+  overflow-x: auto;
+}
+
+.effects-panel,
+.side-panel {
+  flex-shrink: 0;
+}
+
+.preview-column {
+  min-width: 320px;
 }

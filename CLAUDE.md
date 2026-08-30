@@ -33,7 +33,9 @@ cada clip pegado a su vídeo:
   de arriba a abajo y se dibuja la primera pista de vídeo no oculta que
   tenga un clip en ese instante (`resolveActiveVideoPosition` en
   `core/timeline.ts`) — sin mezcla alfa real. Si ninguna tiene
-  contenido, negro.
+  contenido, negro. Excepción única y acotada: un clip con `chromaKey`
+  activo SÍ compone con la pista inmediatamente inferior, pero solo en
+  la exportación — ver "Grading real y croma" más abajo.
 - **Mezcla de audio**: TODAS las pistas no ocultas suenan a la vez y se
   mezclan — tanto el audio pegado a los clips de las pistas de vídeo
   (independientemente de si están tapadas visualmente por una pista de
@@ -138,10 +140,109 @@ carpeta de medios y watcher de cambios en disco — no hay UI hoy para
 "elegir una carpeta de proyecto", y añadirían complejidad real sin una
 necesidad ya confirmada.
 
+**Cuatro ampliaciones para acercar la app a un editor profesional
+(DaVinci Resolve) — pedidas explícitamente el 2026-08-29**, tras un
+análisis crítico de la brecha entre ambos. Cada una se explica por
+separado porque son independientes entre sí:
+
+- **Bin de medios.** Antes, reutilizar un archivo ya cargado para un
+  segundo clip exigía volver a elegirlo con el selector de archivos
+  (cada carga por `addClipFromFile` crea una `sourceId` nueva sin
+  reutilizar nada). El panel "Bin de medios" (`ui/main.ts`,
+  `renderMediaBin`/`addClipFromSource`) lista las fuentes ya cargadas
+  con miniatura y un botón "+" que añade un clip nuevo de esa misma
+  fuente al final de la pista de vídeo más arriba.
+
+- **Máster de audio: EQ de 3 bandas + compresor/limitador.**
+  `Timeline.masterAudio?: MasterAudio` (opcional — undefined se
+  comporta exactamente como antes de esta ampliación, cero coste).
+  `media/masterAudioChain.ts` (`createMasterAudioChain`) construye la
+  cadena de `BiquadFilterNode`×3 + `DynamicsCompressorNode` + ganancia
+  de compensación sobre CUALQUIER `BaseAudioContext` — el mismo código
+  sirve para la reproducción en vivo (`ui/main.ts`,
+  `scheduleAllTrackAudio`) y para la exportación
+  (`export/exportTimeline.ts`, `renderExportAudio`), igual que ya hacía
+  `allAudioSchedules`. `compressorParamsFromAmount` en
+  `core/timeline.ts` es la ÚNICA traducción entre el mando único
+  "cantidad" (0-100) del panel y los `threshold`/`ratio` reales del
+  compresor — simplificación deliberada frente a exponer los 4-5
+  parámetros crudos de un compresor real. Panel "Máster de audio" en
+  el lateral, con botón "Aplicar" (mismo patrón que "Salida"), no
+  controles en vivo mientras se arrastra.
+
+- **Recorte profesional: ripple opt-in + shuttle J/K/L.** El recorte
+  sin ripple (`trimClipIn`/`trimClipOut`, ver más arriba) sigue siendo
+  el comportamiento POR DEFECTO — sin cambios. `trimClipInRipple`/
+  `trimClipOutRipple` (`core/timeline.ts`) son variantes que ADEMÁS
+  desplazan todos los clips de la MISMA pista que empiecen en o después
+  del final original del clip recortado, por la diferencia exacta en
+  ese final — así no se abre ni cierra un hueco. En la UI
+  (`beginTrimDrag`) se activan manteniendo Mayús pulsado al empezar a
+  arrastrar un asa de recorte (capturado una vez al inicio del gesto,
+  no se relee en cada movimiento). J/K/L (`ui/main.ts`, el switch de
+  `keydown`) son shuttle clásico de NLE: L reproduce, K para — ambos
+  reutilizan `playFromPlayhead`/`stopPlayback` tal cual. J NO es
+  reproducción real hacia atrás (el decodificador de este proyecto es
+  solo-adelante, ver `media/frameSeeker.ts`/`createForwardFrameSeeker`
+  y DESIGN.md §3) — retrocede un fotograma por pulsación (`stepFrame`),
+  apoyándose en la repetición de tecla nativa del SO mientras se
+  mantiene pulsada, igual que ya hacía `ArrowLeft`. Deliberadamente
+  fuera de esta ampliación: roll edit (mover a la vez el límite entre
+  dos clips adyacentes) — no encaja con que `startTicks` nunca se toque
+  al recortar (ver más arriba), forzarlo habría producido una función
+  confusa en vez de una herramienta real.
+
+- **Grading real (WebGL) y croma.** Independiente y ADITIVO respecto a
+  `colorFilter` (los 6 presets CSS de siempre, sin cambios) — un clip
+  puede llevar `colorGrade?: ColorGrade` (primarias lift/gamma/gain por
+  canal RGB + saturación + contraste + inversión, fórmula ASC CDL:
+  `out = clamp(in·gain+lift, 0, 1) ^ (1/gamma)`, el estándar real de
+  corrección de color, no una aproximación) y/o `chromaKey?: ChromaKey`
+  (croma por distancia de color). `media/colorGradeGL.ts`
+  (`ColorGradeRenderer`) es una única clase WebGL2 compartida por
+  preview y exportación (una instancia por cada uno, igual que cada uno
+  tiene su propio `AudioContext`/`OfflineAudioContext`): sube el
+  `VideoFrame` como textura, aplica el shader, y deja el resultado en
+  un `OffscreenCanvas` propio que `drawFrameFit` (`media/render.ts`)
+  pinta con `ctx.drawImage` exactamente donde habría pintado el
+  `VideoFrame` — mismo aspect-fit, mismo `ctx.filter` de los presets
+  antiguos ENCIMA (orden fijo: grading real primero, filtro CSS
+  después), cero divergencia entre preview y exportación. Si no hay
+  grading/croma activo (el caso común) o WebGL2 no está disponible,
+  `drawFrameFit` no toca la GPU para nada extra — el coste es
+  exactamente el de siempre.
+  **Limitación deliberada del croma**: solo compone con la pista de
+  vídeo inmediatamente inferior (`resolveActiveVideoPositionBelow`) EN
+  LA EXPORTACIÓN. La previsualización en directo sigue mostrando solo
+  la pista superior (con el croma ya recortado, alfa real, pero sobre
+  negro) — el motor de reproducción en vivo (`media/player.ts`) está
+  construido alrededor de un único `VideoPlayer` activo empujando
+  fotogramas por callback (`onFrame`), no de una tubería que pueda tirar
+  de dos fuentes sincronizadas a la vez; forzarlo habría sido reescribir
+  esa tubería (con el riesgo de reintroducir el bug de "reproducción
+  congelada a mitad de GOP" ya resuelto una vez) por una previsualización
+  perfecta que la exportación ya proporciona. Documentado explícitamente
+  en la UI (panel de croma), no un olvido.
+
+**Bandera de clip (`Clip.flagged`) — ampliación pedida explícitamente el
+2026-08-30.** Estilo DaVinci Resolve: la tecla `G` (y el botón `G` de
+la barra de la timeline) marca/desmarca el clip seleccionado. Es solo
+un distintivo visual (`box-shadow` superior de color en
+`.timeline-clip--flagged`), SIN efecto en reproducción ni exportación —
+distinto del marcador de `M`, que es un punto en la regla, no en un
+clip. `setClipFlagged` en `core/timeline.ts` (pura, misma forma que
+`setClipColorFilter`); se serializa/valida en `core/project.ts` como
+los demás campos opcionales de `Clip`.
+
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:** arrastrar un clip de una pista a otra, importar archivos
 de solo audio (mp3/wav) como fuente propia para una pista de audio,
-cambios de velocidad.
+cambios de velocidad de reproducción de un CLIP (retiming/slow-motion
+— distinto del shuttle J/K/L de arriba, que es solo transporte de
+edición y no toca ningún dato del proyecto), roll edit, compositing
+tipo Fusion (keying con tracking/despill, máscaras, nodos), soporte de
+códecs RAW de cámara o más allá de lo que WebCodecs ya decodifique de
+forma nativa.
 
 No añadas nada de la lista de "fuera de alcance" aunque parezca trivial
 — si aparece la tentación, es señal de que hay que parar y preguntar,
@@ -149,6 +250,138 @@ no de que hay una oportunidad de mejora. Si el usuario pide algo de la
 lista, trátalo como una ampliación deliberada del alcance: quítalo de
 la lista y documenta la decisión aquí, no lo implementes en silencio
 sin actualizar este archivo.
+
+## Interfaz
+
+Rediseño pedido explícitamente el 2026-08-30 ("la interfaz y el menú
+son mejorables · limpia y fácil de entender pero con estilo
+profesional · estilos blancos y glass"). Cuatro cambios, todos sobre
+`index.html` / `ui/styles.css` / `ui/main.ts` (más `electron/` para el
+menú), sin tocar `/core`, `/media` ni `/export`:
+
+- **Menú de aplicación.** En Electron hay una barra de menú NATIVA
+  (`electron/main.cjs`, `buildAppMenu` → `Menu.setApplicationMenu`):
+  Archivo / Editar / Ver / Pista / Ayuda. No reimplementa lógica: cada
+  ítem manda una clave de acción por IPC (`electron/preload.cjs`
+  expone `onMenuAction`), y `ui/main.ts` (`MENU_ACTIONS`) la resuelve
+  haciendo `.click()` en el botón que YA existe en la interfaz —
+  respeta su estado `disabled`. Aceleradores nativos SOLO en combos que
+  el `keydown` del renderer no captura ya (Ctrl+O/S/E/0/±, Ctrl+/):
+  poner acelerador nativo a teclas sueltas (C, M) o a Ctrl+Z las
+  dispararía dos veces. En el navegador (`npm run dev`, sin
+  `window.appVideo`) no hay barra nativa: el botón `☰` de la cabecera
+  abre un desplegable DOM construido desde el mismo listado (`APP_MENU`)
+  y refleja el `disabled` de cada control. En Electron ese botón se
+  oculta. La cabecera queda: `☰` · título · nombre del proyecto ·
+  Abrir vídeo · Deshacer/Rehacer · `?`. Guardar/Cargar pasan al menú
+  (sus botones siguen en el DOM, `hidden`, porque el menú y varias
+  partes de `ui/main.ts` referencian sus ids).
+
+- **Barra de la línea de tiempo mínima** (2\ª iteración, pedida el
+  2026-08-30). Primero se fundieron las dos barras que había (columna
+  vertical de iconos + fila superior) en una sola; después se recortó a
+  lo esencial: SOLO cinco botones "de una tecla" estilo NLE, cada uno
+  con la letra de su atajo (`.tl-btn` / `.tl-key`), más un deslizador
+  de volumen a la derecha:
+  - **A** — seleccionar el clip del playhead (`selectClipAtPlayhead`)
+  - **C** — cortar en el playhead (`splitAtPlayhead`)
+  - **N** — imán/snapping on-off (`snappingEnabled`, ver abajo)
+  - **G** — bandera del clip seleccionado (`Clip.flagged`, ver Alcance)
+  - **M** — marcador en el playhead (`addMarkerAtPlayhead`)
+  Todo lo demás (eliminar clip, texto, +pista vídeo/audio, zoom,
+  insertar transición) se hace desde el menú (nativo o `☰`) y sus
+  atajos; sus botones siguen en el DOM (`<div hidden>`) porque el menú
+  los activa con `.click()`. El tipo/duración de transición se mudaron
+  al panel de efectos (`#transition-duration` bajo "Transiciones",
+  junto a los chips que se arrastran). El botón "Añadir marcador" que
+  estaba en el panel lateral "Marcadores" también se fue a la barra
+  (`#add-marker-button` es único, vive ahí ahora).
+  - **`snappingEnabled`** (tecla N / botón N): interruptor global del
+    imán, encendido por defecto. Lo consultan los TRES sitios que
+    imantaban siempre: `snapTimelineTicks` (scrub del playhead + mover/
+    recortar textos), el bucle de candidatos de `beginClipMoveDrag`, y
+    el `snap()` interno de `beginTrimDrag`. Apagado = arrastre libre,
+    sin pegado a bordes ni marcadores.
+
+- **Volumen de monitor.** Deslizador `#master-volume` a la derecha de
+  la barra de la timeline. Es un `GainNode` (`monitorGain`) que se
+  intercala una sola vez entre la cadena de audio y
+  `audioContext.destination` — sube/baja TODO lo que se oye en la
+  previsualización. NO se guarda en el proyecto, NO interviene en la
+  exportación (`export/exportTimeline.ts` tiene su propio
+  `OfflineAudioContext`) y NO toca el `volume`/`volumeKeyframes` de
+  ningún clip. Decisión pedida explícitamente el 2026-08-30 ("una barra
+  de sonido general para todo, sin tocar el de las timelines").
+
+- **Espaciado del inspector.** Los controles del panel lateral estaban
+  muy apretados: se subieron los paddings/márgenes de
+  `.panel-section-body`, `.field-group`, `.field-grid`, `.slider-row`,
+  `.checkbox-row` y de los `input`/`select`. Solo CSS.
+
+- **Bug corregido (2026-08-30): "al volver a un clip tras un hueco solo
+  vuelve el audio, el vídeo se queda parado".** Al soltar un arrastre de
+  MOVER clip (`beginClipMoveDrag.onUp`), y también al recortar
+  (`beginTrimDrag.onUp`) o redimensionar una transición
+  (`beginTransitionResizeDrag.onUp`), NO se llamaba a
+  `refreshTimelineLayout()` — durante el arrastre solo se movía el clip
+  en el DOM (`syncClipLeftInDom`). Resultado: el caché
+  `timelineTotalTicks` se quedaba con el valor de ANTES de mover. Si el
+  clip se movía más adelante (justo lo que pasa al "dejar un hueco"),
+  `advanceFrom` creía que la timeline acababa antes de llegar al clip y
+  disparaba "Reproducción terminada" — el audio, que se programa entero
+  por adelantado en `playFromPlayhead`, seguía sonando; el vídeo se
+  quedaba en el último fotograma. Arreglo: los tres `onUp` llaman ahora
+  a `refreshTimelineLayout()`, y además `advanceFrom` recalcula la
+  duración total desde `timeline` (`timelineDurationTicks`) en vez de
+  fiarse del caché. De paso, `playClipFrom` re-ancla el vídeo al reloj
+  del audio (`audioTimelineTicksNow`): tras un hueco reproducido en
+  tiempo real el audio puede ir un pelín por delante, así que el vídeo
+  arranca en ESE punto del clip, no en su primer fotograma, y no quedan
+  desincronizados. En `media/player.ts`, `seekTo` marca
+  `decoderNeedsKeyframe` en cuanto crea el decoder nuevo (no tras el
+  flush) y cierra el decoder "en silencio" (`closeDecoderQuietly`) para
+  que un flush rechazado no aborte el `seekTo` siguiente ni deje meter
+  un delta en un decoder recién configurado (otra vía a "vídeo
+  congelado, solo audio").
+
+- **Inspector contextual.** El panel lateral ya no apila 7
+  `<details>` siempre presentes. `renderInspector()` en `ui/main.ts`
+  muestra SOLO lo relevante a la selección: un clip → "Clip" (recorte /
+  audio / filtro + subsecciones plegables Grading y Croma); un texto →
+  editor de texto; nada seleccionado → ajustes de proyecto (Salida ·
+  Máster de audio · Marcadores) + un hint. "Bin de medios" y "Exportar"
+  son siempre visibles (no dependen de la selección). `renderInspector`
+  se llama desde `refreshTimelineLayout` (cubre casi todo) y desde
+  `selectClipRef` / `syncTextEditorPanel` / `clearOverlaySelection`.
+  El grading pasó de 11 `<input type=number>` a `<input type=range>`
+  con lectura numérica (`<output>`, `refreshGradeOutputs`), y tiene
+  **previsualización en vivo**: al arrastrar un slider de grading/croma
+  se pinta el fotograma actual con `activeColorGrade`/`activeChromaKey`
+  leídos del panel (`previewGradeLive`, throttled a fotograma) SIN
+  escribirlos en el clip — eso sigue pasando solo con "Aplicar"
+  (`applyGradeSettings`/`applyChromaSettings`), el modelo de historial
+  no cambia. Si no se aplica, el siguiente `seekToTimelineTicks`/play
+  restaura los valores guardados del clip.
+
+- **Tema claro + glass.** `color-scheme: only light` (+ `<meta
+  name="color-scheme" content="light">`): diseño deliberadamente en
+  claro, se le pide al navegador que no le aplique su modo oscuro
+  automático. Tokens en `:root` (`--panel`/`--panel-alt` translúcidos,
+  `--glass-blur`, `--border`/`--border-strong`, acento `#2f6bff`).
+  Paneles = cristal: `background: rgba(255,255,255,~.6)` +
+  `backdrop-filter: var(--glass-blur)` (cabecera, panel de efectos,
+  panel lateral, barra de timeline, desplegables, modal, tooltip).
+  `body` lleva un degradado suave + `body::before` con manchas de
+  color muy tenues fijas al viewport — sin ellas el `backdrop-filter`
+  no tiene nada que difuminar. **Excepción a propósito**: el área de
+  preview de vídeo (`.preview-canvas-wrap`) es una isla oscura
+  (`#0b0d12`) — el vídeo se juzga mejor sobre un entorno neutro. Los
+  carriles de la timeline, la regla y los gutters pasan a blanco
+  translúcido; la forma de onda a `#3f74d6` y el volumen a `#e07a00`
+  (contraste sobre fondo claro). Nota: un navegador con extensión de
+  modo oscuro tipo Dark Reader / Catppuccin invierte todos los colores
+  y hace que la app se vea oscura — no es un fallo del tema; en
+  Electron (empaquetado, sin extensiones) se ve tal cual.
 
 ## Stack
 
@@ -161,6 +394,10 @@ sin actualizar este archivo.
   muxear el contenedor MP4 de salida.
 - **Canvas 2D** (`OffscreenCanvas` donde se pueda, para no bloquear el hilo
   principal) para componer cada fotograma antes de previsualizar o codificar.
+- **WebGL2** (`media/colorGradeGL.ts`), solo para el grading real/croma
+  (ver "Grading real (WebGL) y croma" más abajo) — el resto del
+  pipeline sigue siendo Canvas 2D; el resultado de WebGL se pinta sobre
+  el Canvas 2D con `drawImage`, nunca sustituye su contexto.
 - Sin framework de UI pesado. UI en TypeScript + DOM directo, o como mucho
   `lit`/preact si `/ui` se vuelve inmanejable — decisión a tomar solo si
   hace falta, no por adelantado.

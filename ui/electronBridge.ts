@@ -13,6 +13,8 @@ export interface AppVideoBridge {
   readFileAsBytes(filePath: string): Promise<ArrayBuffer>;
   /** true si `filePath` sigue existiendo en disco. */
   fileExists(filePath: string): Promise<boolean>;
+  /** Se suscribe a las acciones del menú de aplicación nativo (ver electron/main.cjs). Solo existe dentro de Electron. */
+  onMenuAction(callback: (action: string) => void): void;
 }
 
 declare global {

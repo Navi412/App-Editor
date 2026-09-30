@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="color-scheme" content="light" />
     <title>App Video</title>
+    <!-- Tema claro/oscuro ANTES del primer pintado (sin destello del tema
+         equivocado): preferencia guardada por el interruptor de la
+         cabecera, o si no hay ninguna, la del sistema operativo. La
+         misma clave la lee/escribe ui/main.ts (THEME_STORAGE_KEY). -->
+    <script>
+      (function () {
+        var theme;
+        try {
+          theme = localStorage.getItem("appVideo.theme");
+        } catch (e) {}
+        if (theme !== "dark" && theme !== "light") {
+          theme = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+        document.querySelector('meta[name="color-scheme"]').content = theme;
+      })();
+    </script>
     <link rel="stylesheet" href="/ui/styles.css" />
   </head>
   <body>
@@ -44,6 +61,7 @@
 
       <span class="hint">Arrastra un clip para moverlo · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
 
+      <button id="theme-toggle-button" type="button" class="help-button" title="Modo oscuro" aria-label="Cambiar entre modo claro y oscuro"></button>
       <button id="help-button" type="button" class="help-button" data-icon="helpCircle" title="Atajos de teclado"></button>
     </header>
     <p id="project-status" class="project-status"></p>

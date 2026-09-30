@@ -9,6 +9,7 @@ import {
   createTransition,
   insertClip,
   moveClipTo,
+  moveClipToTrack,
   moveTrack,
   moveVolumeKeyframe,
   NEUTRAL_MASTER_AUDIO,
@@ -676,6 +677,32 @@ function playFromTimelineTicks(startTicks: number): Promise<void> {
 async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): Promise<void> {
   const player = getPlayer(clip.sourceId);
 
+  // Continuación sin costura: si el clip que acaba de terminar es de la
+  // MISMA fuente y este empieza exactamente donde aquel acabó — tanto en
+  // la timeline como en el archivo, lo típico tras un corte (C) sin
+  // separar los trozos —, el decoder ya está justo en ese punto con los
+  // siguientes fotogramas en cola. Un seekTo() aquí tiraba esa cola y
+  // decodificaba el GOP entero hasta el corte DOS veces (el seek, y el
+  // re-cebado desde keyframe que exige WebCodecs tras su flush()): con
+  // keyframes cada varios segundos (grabaciones de OBS/cámara), el vídeo
+  // se quedaba parado en el corte mientras seguía el audio.
+  const previous = activeSegment;
+  if (
+    offsetTicks === 0 &&
+    previous?.kind === "clip" &&
+    previous.clip.sourceId === clip.sourceId &&
+    previous.clip.sourceOutTicks === clip.sourceInTicks &&
+    clipEndTicks(previous.clip) === clip.startTicks
+  ) {
+    activeSegment = { kind: "clip", trackId, clip };
+    activeColorFilter = clip.colorFilter;
+    activeColorGrade = clip.colorGrade;
+    activeChromaKey = clip.chromaKey;
+    player.play(Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000));
+    pauseButton.disabled = false;
+    return;
+  }
+
   // Re-ancla el vídeo al reloj del audio (que se programó por adelantado
   // y no espera a nadie): si el audio ya está SONANDO por dentro de este
   // clip más allá de `offsetTicks` — lo típico al cruzar un hueco, que
@@ -1157,17 +1184,19 @@ timelineRuler.addEventListener("pointerdown", beginTimelineScrub);
 const CLIP_DRAG_CLICK_THRESHOLD_PX = 3;
 
 /**
- * Arrastra el cuerpo de un clip (vídeo real o transición) para moverlo
- * en el tiempo dentro de SU MISMA pista. Ya no hay huecos-objeto que
- * crecer/consumir (ver CLAUDE.md, ampliación de alcance del
- * 2026-08-21): mover un clip es simplemente cambiar su `startTicks`,
- * con imán a los bordes de sus vecinos (y al playhead) — moveClipTo ya
- * se encarga de no dejarlo solapar. Recalcula SIEMPRE desde
- * `dragStartTimeline` (nunca acumula sobre el `timeline` de la
- * iteración anterior), igual que beginTrimDrag — evita que el redondeo
- * de cada paso se acumule. Un solo paso de historial al soltar; un
- * gesto sin apenas movimiento se trata como un simple click de
- * selección, no como un arrastre.
+ * Arrastra el cuerpo de un clip de vídeo para moverlo en el tiempo y,
+ * si el cursor pasa a OTRA pista de vídeo, a esa pista (ampliación de
+ * alcance pedida explícitamente el 2026-09-30 — antes un clip se quedaba
+ * siempre en la pista en la que se creó). Mover dentro de la misma pista
+ * es cambiar su `startTicks` (moveClipTo); a otra pista, moveClipToTrack,
+ * que lo encaja en el hueco donde cae sin solapar a nadie — si no cabe
+ * ahí, el clip se queda de momento en su pista original. Imán a los
+ * bordes de los clips de la pista bajo el cursor (y al playhead).
+ * Recalcula SIEMPRE desde `dragStartTimeline` (nunca acumula sobre el
+ * `timeline` de la iteración anterior), igual que beginTrimDrag — evita
+ * que el redondeo de cada paso se acumule. Un solo paso de historial al
+ * soltar; un gesto sin apenas movimiento se trata como un simple click
+ * de selección, no como un arrastre.
  */
 function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string): void {
   if (!timeline) return;
@@ -1178,24 +1207,36 @@ function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string)
   const maybeDragStartTrack = dragStartTimeline.tracks.find((t) => t.id === trackId);
   const maybeOriginalClip = maybeDragStartTrack?.clips.find((c) => c.id === clipId);
   if (!maybeDragStartTrack || !maybeOriginalClip) return;
-  const dragStartTrack = maybeDragStartTrack;
   const originalClip = maybeOriginalClip;
   const startClientX = event.clientX;
+  const startClientY = event.clientY;
   const snapThresholdTicks = Math.max(1, secondsToTicks(SNAP_PIXELS / pixelsPerSecond));
   const duration = clipDurationTicks(originalClip);
   let moved = false;
+  // Pista en la que está el clip AHORA MISMO en `timeline` (y en el DOM).
+  let currentTrackId = trackId;
+
+  /** Pista de vídeo bajo el cursor (su carril principal o el de su audio pegado), o undefined. */
+  function videoTrackIdAt(clientX: number, clientY: number): string | undefined {
+    const lane = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>(".timeline-track-lane[data-track-id]");
+    return lane?.dataset.trackId;
+  }
 
   function onMove(moveEvent: PointerEvent): void {
     const dxPx = moveEvent.clientX - startClientX;
-    if (!moved && Math.abs(dxPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return; // podría ser solo un click
+    const dyPx = moveEvent.clientY - startClientY;
+    if (!moved && Math.abs(dxPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX && Math.abs(dyPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return; // podría ser solo un click
     moved = true;
     if (!timeline) return;
 
+    const hoveredTrackId = videoTrackIdAt(moveEvent.clientX, moveEvent.clientY) ?? currentTrackId;
+    const snapTrack = dragStartTimeline.tracks.find((t) => t.id === hoveredTrackId);
+
     let newStart = Math.max(0, originalClip.startTicks + secondsToTicks(dxPx / pixelsPerSecond));
-    if (snappingEnabled) {
+    if (snappingEnabled && snapTrack) {
       const candidates = [
         playheadTicks,
-        ...dragStartTrack.clips.filter((c) => c.id !== clipId).flatMap((c) => [c.startTicks, clipEndTicks(c)]),
+        ...snapTrack.clips.filter((c) => c.id !== clipId).flatMap((c) => [c.startTicks, clipEndTicks(c)]),
       ];
       for (const candidate of candidates) {
         if (Math.abs(newStart - candidate) <= snapThresholdTicks) {
@@ -1210,10 +1251,29 @@ function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string)
       }
     }
 
-    timeline = moveClipTo(dragStartTimeline, trackId, clipId, newStart);
-    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-    if (updated) {
+    let next: Timeline;
+    let nextTrackId = hoveredTrackId;
+    try {
+      next = moveClipToTrack(dragStartTimeline, trackId, clipId, hoveredTrackId, newStart);
+    } catch {
+      // No cabe en la pista bajo el cursor (o no es una pista válida):
+      // se queda en su pista original, moviéndose solo en el tiempo.
+      next = moveClipTo(dragStartTimeline, trackId, clipId, newStart);
+      nextTrackId = trackId;
+    }
+    timeline = next;
+
+    const updated = timeline.tracks.find((t) => t.id === nextTrackId)?.clips.find((c) => c.id === clipId);
+    if (nextTrackId !== currentTrackId) {
+      // Cambiar de carril sí exige reconstruir las filas (el bloque del
+      // clip y su celda de audio viven dentro del carril de su pista).
+      currentTrackId = nextTrackId;
+      selectedClip = { trackId: nextTrackId, clipId };
+      renderTimelineTracks();
+    } else if (updated) {
       syncClipLeftInDom(clipId, updated.startTicks);
+    }
+    if (updated) {
       showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, formatRulerTime(ticksToSeconds(updated.startTicks)));
     }
   }
@@ -1236,10 +1296,10 @@ function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string)
     // al clip — solo se oía el audio (ya programado) y el vídeo se
     // quedaba parado.
     refreshTimelineLayout();
-    selectClipRef(trackId, clipId);
-    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    selectClipRef(currentTrackId, clipId);
+    const updated = timeline.tracks.find((t) => t.id === currentTrackId)?.clips.find((c) => c.id === clipId);
     if (updated) void seekToTimelineTicks(updated.startTicks);
-    status.textContent = "Clip movido.";
+    status.textContent = currentTrackId === trackId ? "Clip movido." : "Clip movido a otra pista.";
   }
 
   window.addEventListener("pointermove", onMove);
@@ -2214,6 +2274,8 @@ function renderTimelineTracks(): void {
     mainLane.className = "timeline-track-lane " + (track.kind === "video" ? "timeline-track-lane--video" : "timeline-track-lane--audio");
     mainLane.style.height = `${laneHeightPx(track.id, track.kind === "video" ? DEFAULT_VIDEO_LANE_HEIGHT_PX : DEFAULT_AUDIO_LANE_HEIGHT_PX)}px`;
     if (track.kind === "video") {
+      // Destino de "mover clip a otra pista" (ver beginClipMoveDrag).
+      mainLane.dataset.trackId = track.id;
       renderVideoLaneClips(track, mainLane);
       mainLane.addEventListener("pointerdown", (event) => {
         if ((event.target as HTMLElement).closest(".timeline-clip")) return;
@@ -2233,6 +2295,7 @@ function renderTimelineTracks(): void {
       const subGutter = buildTrackSubGutter();
       const audioLane = document.createElement("div");
       audioLane.className = "timeline-track-lane timeline-track-lane--audio";
+      audioLane.dataset.trackId = track.id; // soltar sobre el audio pegado cuenta como su pista de vídeo
       audioLane.style.height = `${laneHeightPx(audioRowKey, DEFAULT_AUDIO_LANE_HEIGHT_PX)}px`;
       renderAudioLaneClips(track, audioLane);
       attachRowResizeHandle(subGutter, audioLane, audioRowKey);
@@ -3507,6 +3570,36 @@ function renderTextTrack(): void {
 // click en el control que YA existe en la interfaz, respetando su estado
 // `disabled`. El menú nativo de Electron (ver electron/main.cjs) envía
 // estas mismas claves de acción vía onMenuAction.
+// --- Tema claro / oscuro (pedido explícito del 2026-09-30) ---
+// El script en línea de index.html ya dejó puesto data-theme en <html>
+// antes del primer pintado; aquí solo se sincroniza el botón y se
+// alterna. La preferencia es por equipo (localStorage), no del proyecto.
+const THEME_STORAGE_KEY = "appVideo.theme";
+const themeToggleButton = requireElement<HTMLButtonElement>("#theme-toggle-button");
+
+function currentTheme(): "light" | "dark" {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme: "light" | "dark"): void {
+  document.documentElement.dataset.theme = theme;
+  document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]')?.setAttribute("content", theme);
+  // El icono muestra a qué modo se cambia al pulsar, no el actual.
+  themeToggleButton.innerHTML = iconMarkup(theme === "dark" ? "sun" : "moon");
+  themeToggleButton.title = theme === "dark" ? "Modo claro" : "Modo oscuro";
+}
+
+themeToggleButton.addEventListener("click", () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch {
+    /* sin almacenamiento (modo privado, etc.): el cambio vale para esta sesión */
+  }
+});
+applyTheme(currentTheme());
+
 const MENU_ACTIONS: Record<string, () => void> = {
   "open-video": () => fileInput.click(),
   "load-project": () => loadProjectButton.click(),
@@ -3528,6 +3621,7 @@ const MENU_ACTIONS: Record<string, () => void> = {
   "add-video-track": () => clickIfEnabled(addVideoTrackButton),
   "add-audio-track": () => clickIfEnabled(addAudioTrackButton),
   "show-shortcuts": () => shortcutsModal.showModal(),
+  "toggle-theme": () => themeToggleButton.click(),
 };
 
 function clickIfEnabled(button: HTMLButtonElement): void {
@@ -3591,6 +3685,7 @@ const APP_MENU: { group: string; items: { label: string; action: string }[] }[] 
       { label: "Alejar la timeline", action: "zoom-out" },
       { label: "Ajustar la timeline a la ventana", action: "zoom-fit" },
       { label: "Alternar zoom del preview", action: "toggle-preview-zoom" },
+      { label: "Modo oscuro / claro", action: "toggle-theme" },
       { label: "Atajos de teclado", action: "show-shortcuts" },
     ],
   },

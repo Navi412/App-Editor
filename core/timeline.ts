@@ -299,6 +299,61 @@ export function moveClipTo(timeline: Timeline, trackId: string, clipId: string, 
 }
 
 /**
+ * Mueve el clip `clipId` de la pista `fromTrackId` a OTRA pista
+ * `toTrackId` del mismo tipo (ampliación de alcance pedida
+ * explícitamente el 2026-09-30 — antes un clip se quedaba siempre en su
+ * pista). Las transiciones no se pueden mover así: son un concepto de
+ * su propia pista (funden entre SUS vecinos, ver neighborsOfTransition).
+ *
+ * Colocación: el clip cae en el hueco de la pista destino donde queda
+ * su punto medio (cada clip ya existente cuenta como "a la izquierda"
+ * o "a la derecha" según su propio punto medio), y dentro de ese hueco
+ * se recorta a `newStartTicks` sin solapar a nadie — la misma idea de
+ * "toparse con el vecino" que moveClipTo. Lanza si el clip no cabe en
+ * ese hueco, en vez de pisar o empujar otros clips.
+ */
+export function moveClipToTrack(
+  timeline: Timeline,
+  fromTrackId: string,
+  clipId: string,
+  toTrackId: string,
+  newStartTicks: number,
+): Timeline {
+  if (fromTrackId === toTrackId) return moveClipTo(timeline, fromTrackId, clipId, newStartTicks);
+  const fromTrack = timeline.tracks[requireTrackIndex(timeline, fromTrackId)]!;
+  const toTrack = timeline.tracks[requireTrackIndex(timeline, toTrackId)]!;
+  if (fromTrack.kind !== toTrack.kind) {
+    throw new RangeError("Un clip solo puede moverse a otra pista del mismo tipo");
+  }
+  const clip = fromTrack.clips[requireClipIndex(fromTrack, clipId)]!;
+  if (clip.kind === "transition") {
+    throw new RangeError("Una transición no puede moverse a otra pista");
+  }
+
+  const duration = clipDurationTicks(clip);
+  const desiredStart = Math.max(0, newStartTicks);
+  const midpoint = desiredStart + duration / 2;
+  let leftBound = 0;
+  let rightBound = Infinity;
+  for (const other of toTrack.clips) {
+    const otherMid = (other.startTicks + clipEndTicks(other)) / 2;
+    if (otherMid <= midpoint) leftBound = Math.max(leftBound, clipEndTicks(other));
+    else rightBound = Math.min(rightBound, other.startTicks);
+  }
+  if (rightBound - leftBound < duration) {
+    throw new RangeError("El clip no cabe en ese hueco de la pista destino");
+  }
+  const startTicks = Math.max(leftBound, Math.min(desiredStart, rightBound - duration));
+
+  const tracks = timeline.tracks.map((track) => {
+    if (track.id === fromTrackId) return { ...track, clips: track.clips.filter((c) => c.id !== clipId) };
+    if (track.id === toTrackId) return { ...track, clips: sortByStart([...track.clips, { ...clip, startTicks }]) };
+    return track;
+  });
+  return { ...timeline, tracks };
+}
+
+/**
  * Parte el clip que ocupa `timelineTicks` en la pista `trackId` en dos.
  * newIds debe traer los ids de los dos clips resultantes:
  * [idDelPrimerTrozo, idDelSegundoTrozo] — se piden explícitos para que

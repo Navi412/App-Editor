@@ -58,10 +58,18 @@ cada clip pegado a su vídeo:
   ya no desplaza automáticamente al resto de la pista (sin ripple
   automático) — el hueco que deja o cierra un recorte es siempre
   explícito.
-- **Arrastrar un clip entre pistas no está soportado** — un clip se
-  queda en la pista en la que se creó. Es una decisión de alcance
-  deliberada para acotar el tamaño de esta ampliación, no un olvido; se
-  puede pedir como ampliación aparte.
+- **Arrastrar un clip de vídeo a otra pista de vídeo — ampliación
+  pedida explícitamente el 2026-09-30** (antes un clip se quedaba en la
+  pista en la que se creó). `moveClipToTrack` en `core/timeline.ts`:
+  solo entre pistas del MISMO tipo y nunca transiciones (son de su
+  pista, funden entre SUS vecinos). El clip cae en el hueco de la pista
+  destino donde queda su punto medio y se topa con los vecinos como en
+  `moveClipTo`; si no cabe en ese hueco, lanza — en la UI
+  (`beginClipMoveDrag`) eso significa que el clip sigue en su pista
+  original mientras el cursor esté sobre un hueco demasiado pequeño. Su
+  audio pegado viaja con él (es el mismo `Clip`). Los clips de las
+  pistas de AUDIO independientes siguen sin gesto de mover (ni dentro
+  de su pista ni entre pistas) — solo tienen el arrastre de volumen.
 - Las transiciones siguen siendo un concepto por-pista-de-vídeo (funden
   entre los dos clips vecinos de SU MISMA pista): no reproducen vídeo
   propio, congelan el último fotograma del clip anterior y el primero
@@ -235,7 +243,7 @@ clip. `setClipFlagged` en `core/timeline.ts` (pura, misma forma que
 los demás campos opcionales de `Clip`.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
-ampliarlo:** arrastrar un clip de una pista a otra, importar archivos
+ampliarlo:** mover clips de las pistas de audio independientes, importar archivos
 de solo audio (mp3/wav) como fuente propia para una pista de audio,
 cambios de velocidad de reproducción de un CLIP (retiming/slow-motion
 — distinto del shuttle J/K/L de arriba, que es solo transporte de
@@ -344,6 +352,33 @@ menú), sin tocar `/core`, `/media` ni `/export`:
   un delta en un decoder recién configurado (otra vía a "vídeo
   congelado, solo audio").
 
+- **Bug corregido (2026-09-30): "tras un corte (C), al reproducir se
+  para en el corte".** Al terminar el trozo A, `playClipFrom` trataba
+  el trozo B como un salto nuevo (`seekTo`) aunque fuese continuación
+  exacta del mismo archivo: el seek decodificaba el GOP entero hasta el
+  corte y, como tras un `flush()` WebCodecs exige empezar por keyframe,
+  al reanudar lo decodificaba OTRA vez. Con keyframes cada varios
+  segundos (grabaciones de OBS/cámara, 1080p+) el vídeo se quedaba
+  clavado en el corte mientras seguía el audio. Arreglo: si el clip
+  anterior es de la misma fuente y B empieza exactamente donde acabó
+  (en timeline y en archivo), se sigue con `player.play()` sin seek.
+  De paso, `media/player.ts` descarta (`discardBeforeUs`) los
+  fotogramas re-decodificados desde el keyframe anteriores al objetivo
+  del seek — antes se pintaban y el playhead saltaba atrás y avanzaba
+  en rápido al darle a play a mitad de un GOP.
+  **Causa de fondo (encontrada después, el mismo día, probando en
+  Electron — en Chrome no se reproducía):** `seekTo` acumulaba en
+  `outputQueue` TODOS los fotogramas decodificados desde el keyframe
+  hasta el objetivo y no cerraba ninguno hasta el final del `flush()`.
+  El decoder por hardware tiene pocos búferes de salida (en Electron se
+  atascaba con 8 `VideoFrame` abiertos) y abortaba el `flush()` sin
+  llamar a su callback de error: cualquier seek a más de ~8 fotogramas
+  de un keyframe fallaba en silencio — vídeo congelado al volver tras un
+  corte o un hueco, audio sonando. Ahora el seek usa `seekSink`: se
+  queda solo con el mejor candidato y cierra el resto según salen.
+  `media/frameSeeker.ts` (exportación/transiciones, decoder software)
+  hace lo mismo con `currentTargetUs`, para no acumular el GOP entero.
+
 - **Inspector contextual.** El panel lateral ya no apila 7
   `<details>` siempre presentes. `renderInspector()` en `ui/main.ts`
   muestra SOLO lo relevante a la selección: un clip → "Clip" (recorte /
@@ -363,25 +398,45 @@ menú), sin tocar `/core`, `/media` ni `/export`:
   no cambia. Si no se aplica, el siguiente `seekToTimelineTicks`/play
   restaura los valores guardados del clip.
 
-- **Tema claro + glass.** `color-scheme: only light` (+ `<meta
-  name="color-scheme" content="light">`): diseño deliberadamente en
-  claro, se le pide al navegador que no le aplique su modo oscuro
-  automático. Tokens en `:root` (`--panel`/`--panel-alt` translúcidos,
-  `--glass-blur`, `--border`/`--border-strong`, acento `#2f6bff`).
-  Paneles = cristal: `background: rgba(255,255,255,~.6)` +
-  `backdrop-filter: var(--glass-blur)` (cabecera, panel de efectos,
-  panel lateral, barra de timeline, desplegables, modal, tooltip).
-  `body` lleva un degradado suave + `body::before` con manchas de
-  color muy tenues fijas al viewport — sin ellas el `backdrop-filter`
-  no tiene nada que difuminar. **Excepción a propósito**: el área de
-  preview de vídeo (`.preview-canvas-wrap`) es una isla oscura
-  (`#0b0d12`) — el vídeo se juzga mejor sobre un entorno neutro. Los
-  carriles de la timeline, la regla y los gutters pasan a blanco
-  translúcido; la forma de onda a `#3f74d6` y el volumen a `#e07a00`
-  (contraste sobre fondo claro). Nota: un navegador con extensión de
-  modo oscuro tipo Dark Reader / Catppuccin invierte todos los colores
-  y hace que la app se vea oscura — no es un fallo del tema; en
-  Electron (empaquetado, sin extensiones) se ve tal cual.
+- **Modo oscuro con interruptor** (pedido explícito del 2026-09-30).
+  Botón ☾/☀ en la cabecera (`#theme-toggle-button`, junto a `?`) y
+  Ver › "Modo oscuro / claro" en ambos menús (nativo con Ctrl+Mayús+D,
+  combo que el `keydown` del renderer no captura; y el desplegable
+  `☰`). `:root[data-theme="dark"]` en `ui/styles.css` redefine los
+  mismos tokens (misma técnica neumórfica: superficie `#2a2d34`, luz
+  gris apenas más clara, sombra casi negra; acento naranja `#ff6a2b`
+  como la variante oscura de la referencia). Un script en línea en
+  `index.html` fija `data-theme` ANTES del primer pintado (sin
+  destello): preferencia guardada en `localStorage`
+  (`appVideo.theme`, por equipo, no se guarda en el proyecto) o, si no
+  hay, la del sistema operativo. `ui/main.ts` (`applyTheme`) solo
+  sincroniza el icono y alterna. Cualquier color nuevo del CSS tiene que
+  ser un token con valor en ambos temas, no un literal.
+
+- **Tema claro neumórfico** (sustituye al "claro + glass" anterior —
+  pedido explícito del 2026-09-30, imagen de referencia en
+  `design-references/`). `color-scheme: only light` en claro y
+  `only dark` en oscuro (+ `<meta name="color-scheme">`, que actualiza
+  el mismo script/`applyTheme`). Toda la interfaz es UNA
+  superficie opaca `--surface` (`#e4e9f2`, gris azulado); los
+  controles salen de ella o se hunden en ella SOLO con sombras dobles
+  (clara arriba-izquierda, oscura abajo-derecha), sin bordes ni
+  transparencias ni `backdrop-filter`. Tokens en `:root`:
+  `--nm-raised`/`--nm-raised-sm` (relieve: botones, tarjetas del
+  inspector, carpetas de efectos, desplegables, modal) y
+  `--nm-inset`/`--nm-inset-sm` (hundido: campos de texto/número,
+  canal de los deslizadores, contenedor de la timeline, barra de
+  progreso, píldora de estado). Pulsar un botón lo hunde (`:active`);
+  un interruptor encendido (imán N) se queda hundido con el icono en
+  acento `#2f6bff`, no con relleno de color. Deslizadores, casillas y
+  scrollbars van estilizados a mano (`appearance: none`, al final de
+  `ui/styles.css`). **Excepción a propósito**: el preview de vídeo
+  (`.preview-canvas-wrap`) sigue siendo una isla oscura (`#0b0d12`),
+  enmarcada como una pantalla en relieve — el vídeo se juzga mejor
+  sobre un entorno neutro. Los clips de la timeline mantienen sus
+  colores (miniatura/azul, transición morada). Nota: una extensión de
+  modo oscuro del navegador (Dark Reader / Catppuccin) invierte encima
+  los colores — no es un fallo del tema; en Electron no hay extensiones.
 
 ## Stack
 

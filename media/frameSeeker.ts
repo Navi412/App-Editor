@@ -48,8 +48,30 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
   );
 
   const pending: VideoFrame[] = [];
+  // Umbral de la petición en curso (decodeUpTo). De los fotogramas que
+  // salen por debajo de él solo interesa el más reciente — next() cierra
+  // el resto igualmente —, así que se cierran según llegan en vez de
+  // acumular el GOP entero hasta el objetivo (cientos de VideoFrame con
+  // un keyframe lejano: grabaciones de OBS/cámara). Mismo motivo que el
+  // seekSink de media/player.ts.
+  let currentTargetUs = -Infinity;
   const decoder = new VideoDecoder({
-    output: (frame) => pending.push(frame),
+    output: (frame) => {
+      if (frame.timestamp <= currentTargetUs) {
+        for (let i = pending.length - 1; i >= 0; i--) {
+          const older = pending[i]!;
+          if (older.timestamp <= currentTargetUs && older.timestamp < frame.timestamp) {
+            older.close();
+            pending.splice(i, 1);
+          }
+        }
+        if (pending.some((p) => p.timestamp <= currentTargetUs && p.timestamp >= frame.timestamp)) {
+          frame.close();
+          return;
+        }
+      }
+      pending.push(frame);
+    },
     error: (error) => {
       throw error;
     },
@@ -125,6 +147,7 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
     // como "no listo". El umbral real nunca es menor que su timestamp.
     const effectiveTimeUs = Math.max(timeUs, target.timestampUs);
     const feedUpTo = Math.min(samples.length - 1, target.index + LOOKAHEAD_SAMPLES);
+    currentTargetUs = effectiveTimeUs;
 
     primeIfNeeded();
 

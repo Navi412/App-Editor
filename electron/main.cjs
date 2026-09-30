@@ -69,6 +69,9 @@ function buildAppMenu() {
         { label: "Ajustar la timeline a la ventana", accelerator: "CmdOrCtrl+0", click: () => sendMenuAction("zoom-fit") },
         { type: "separator" },
         { label: "Alternar zoom del preview", click: () => sendMenuAction("toggle-preview-zoom") },
+        // Ctrl+Mayús+D: combo que el keydown del renderer no captura (ver
+        // CLAUDE.md, "Menú de aplicación"), así no se dispara dos veces.
+        { label: "Modo oscuro / claro", accelerator: "CmdOrCtrl+Shift+D", click: () => sendMenuAction("toggle-theme") },
         { type: "separator" },
         { role: "togglefullscreen", label: "Pantalla completa" },
         { role: "toggleDevTools", label: "Herramientas de desarrollo" },

@@ -98,10 +98,41 @@ export function createVideoPlayer(
   // decoder desde el keyframe más cercano antes de retomar el feed
   // normal. Ver primeDecoderIfNeeded más abajo.
   let decoderNeedsKeyframe = false;
+  // Tras re-cebar desde el keyframe (primeDecoderIfNeeded), el decoder
+  // vuelve a producir los fotogramas ANTERIORES al ya mostrado por el
+  // seek. Todos tienen PTS "en el pasado", así que el frame-hold de
+  // tick() los iba pintando uno por tick según salían — el vídeo (y el
+  // playhead) saltaba atrás al keyframe y avanzaba en rápido hasta el
+  // punto de partida. Se descartan sin pintar los anteriores a esto.
+  let discardBeforeUs = -Infinity;
+  /** PTS del fotograma objetivo del último seekTo() — el umbral de discardBeforeUs al re-cebar. */
+  let lastSeekTargetUs = 0;
+  // Mientras un seekTo() decodifica desde el keyframe hasta su objetivo,
+  // sus fotogramas van aquí en vez de a outputQueue: se queda solo con el
+  // mejor candidato y cierra el resto AL MOMENTO. Antes se acumulaban
+  // todos hasta el final del flush() — con un keyframe lejano (GOP largo:
+  // grabaciones de OBS/cámara) eran cientos de VideoFrame abiertos, y el
+  // decoder por hardware (pocos búferes de salida: en Electron se atascaba
+  // con 8) se quedaba sin sitio y abortaba el flush sin error visible. El
+  // seek fallaba en silencio: vídeo congelado tras un corte o un hueco
+  // mientras el audio, programado aparte, seguía sonando.
+  let seekSink: ((frame: VideoFrame) => void) | undefined;
 
   function createDecoder(): VideoDecoder {
     const decoder = new VideoDecoder({
-      output: (frame) => outputQueue.push(frame),
+      output: (frame) => {
+        if (seekSink) {
+          seekSink(frame);
+          return;
+        }
+        // Duplicado del re-cebado (ver discardBeforeUs): se cierra YA, no
+        // se deja ocupando un búfer de salida del decoder hasta el tick.
+        if (frame.timestamp < discardBeforeUs) {
+          frame.close();
+          return;
+        }
+        outputQueue.push(frame);
+      },
       error: (error) => {
         callbacks.onStatus?.(`Error de decodificación: ${error.message}`);
       },
@@ -174,8 +205,12 @@ export function createVideoPlayer(
    * los descarta sin pintarlos.
    */
   function primeDecoderIfNeeded(): void {
-    if (!decoderNeedsKeyframe) return;
+    if (!decoderNeedsKeyframe) {
+      discardBeforeUs = -Infinity;
+      return;
+    }
     decoderNeedsKeyframe = false;
+    discardBeforeUs = lastSeekTargetUs;
     let keyframeIndex = Math.max(0, nextSampleIndex - 1);
     while (keyframeIndex > 0 && !samples[keyframeIndex]!.is_sync) keyframeIndex--;
     nextSampleIndex = keyframeIndex;
@@ -200,6 +235,10 @@ export function createVideoPlayer(
     let shown: VideoFrame | undefined;
     while (outputQueue.length > 0 && outputQueue[0]!.timestamp <= nowUs) {
       const next = outputQueue.shift()!;
+      if (next.timestamp < discardBeforeUs) {
+        next.close();
+        continue;
+      }
       shown?.close();
       shown = next;
     }
@@ -236,6 +275,7 @@ export function createVideoPlayer(
     // (p.ej. si el original tenía un edit list) — comparar contra
     // timeUs a secas podría descartar el propio fotograma objetivo.
     const effectiveTimeUs = Math.max(timeUs, sampleTimestampUs(target));
+    lastSeekTargetUs = sampleTimestampUs(target);
 
     let keyframeIndex = targetDecodeIndex;
     while (keyframeIndex > 0 && !samples[keyframeIndex]!.is_sync) keyframeIndex--;
@@ -254,6 +294,20 @@ export function createVideoPlayer(
     // limpio y la reproducción se quedaba congelada al reanudar tras un
     // hueco (solo volvía el audio, ya programado por adelantado).
     decoderNeedsKeyframe = true;
+
+    let best: VideoFrame | undefined;
+    const sink = (frame: VideoFrame): void => {
+      if (frame.timestamp <= effectiveTimeUs && (!best || frame.timestamp > best.timestamp)) {
+        best?.close();
+        best = frame;
+      } else {
+        frame.close();
+      }
+    };
+    seekSink = sink;
+    const releaseSink = (): void => {
+      if (seekSink === sink) seekSink = undefined;
+    };
 
     for (let i = keyframeIndex; i <= targetDecodeIndex; i++) {
       const sample = samples[i]!;
@@ -276,25 +330,19 @@ export function createVideoPlayer(
       // adelantado, deja `nextSampleIndex` en el keyframe objetivo para
       // que el próximo feed()/play() arranque desde ahí y no meta un
       // delta en un decoder recién creado.
+      releaseSink();
+      best?.close();
       if (generation === seekGeneration) nextSampleIndex = keyframeIndex;
       return;
     }
+    releaseSink();
     if (generation !== seekGeneration) {
       // un seek más nuevo ya completó mientras este flush estaba en vuelo
-      for (const frame of outputQueue.splice(0)) frame.close();
+      best?.close();
       return;
     }
 
-    let shown: VideoFrame | undefined;
-    for (const frame of outputQueue.splice(0)) {
-      if (frame.timestamp <= effectiveTimeUs && (!shown || frame.timestamp > shown.timestamp)) {
-        shown?.close();
-        shown = frame;
-      } else {
-        frame.close();
-      }
-    }
-    if (shown) showFrame(shown);
+    if (best) showFrame(best);
 
     nextSampleIndex = targetDecodeIndex + 1;
   }

@@ -15,6 +15,7 @@ import {
   insertClip,
   isNeutralColorGrade,
   moveClipTo,
+  moveClipToTrack,
   moveTrack,
   moveVolumeKeyframe,
   neighborsOfTransition,
@@ -396,6 +397,75 @@ describe("appendClip / insertClip / removeClip", () => {
   it("removeClip lanza con un clipId inexistente", () => {
     const timeline = twoClipTimeline();
     expect(() => removeClip(timeline, "video-1", "no-existe")).toThrow(RangeError);
+  });
+});
+
+describe("moveClipToTrack", () => {
+  /** twoClipTimeline + una segunda pista de vídeo (arriba) con "c" en 4s-6s y una pista de audio. */
+  function twoTrackTimeline(): Timeline {
+    const base = twoClipTimeline();
+    return {
+      ...base,
+      tracks: [
+        ...base.tracks,
+        { id: "video-2", kind: "video", hidden: false, clips: [clip("c", "source-c", 4, 0, 2)] },
+        { id: "audio-1", kind: "audio", hidden: false, clips: [] },
+      ],
+    };
+  }
+
+  it("saca el clip de su pista y lo coloca en la destino en la posición pedida", () => {
+    const next = moveClipToTrack(twoTrackTimeline(), "video-1", "a", "video-2", secondsToTicks(1));
+    expect(next.tracks[0]!.clips.map((c) => c.id)).toEqual(["b"]);
+    const moved = next.tracks[1]!.clips;
+    expect(moved.map((c) => c.id)).toEqual(["a", "c"]);
+    expect(moved[0]!.startTicks).toBe(secondsToTicks(1));
+    // Solo cambia de pista y de posición: rango de fuente intacto.
+    expect(moved[0]!.sourceInTicks).toBe(0);
+    expect(moved[0]!.sourceOutTicks).toBe(secondsToTicks(2));
+  });
+
+  it("se topa con los vecinos de la pista destino en vez de solaparlos", () => {
+    // "a" dura 2s; pedirlo en 3s solaparía con "c" (4s-6s) — su punto
+    // medio (4s) cae a la izquierda del de "c" (5s), así que se recorta
+    // para terminar justo donde empieza "c".
+    const next = moveClipToTrack(twoTrackTimeline(), "video-1", "a", "video-2", secondsToTicks(3));
+    expect(next.tracks[1]!.clips.map((c) => [c.id, c.startTicks])).toEqual([
+      ["a", secondsToTicks(2)],
+      ["c", secondsToTicks(4)],
+    ]);
+  });
+
+  it("lanza si el clip no cabe en el hueco de destino", () => {
+    const tl = twoTrackTimeline();
+    const tight: Timeline = {
+      ...tl,
+      tracks: tl.tracks.map((t) =>
+        t.id === "video-2" ? { ...t, clips: [clip("d", "source-d", 0, 0, 1), clip("c", "source-c", 2, 0, 2)] } : t,
+      ),
+    };
+    // Hueco 1s-2s (1s) para un clip de 3s ("b").
+    expect(() => moveClipToTrack(tight, "video-1", "b", "video-2", secondsToTicks(1))).toThrow(RangeError);
+  });
+
+  it("no mezcla tipos de pista ni mueve transiciones", () => {
+    expect(() => moveClipToTrack(twoTrackTimeline(), "video-1", "a", "audio-1", 0)).toThrow(RangeError);
+    const withTransition = insertClip(twoTrackTimeline(), "video-2", createTransition("t", secondsToTicks(8), secondsToTicks(1), "crossfade"));
+    expect(() => moveClipToTrack(withTransition, "video-2", "t", "video-1", secondsToTicks(10))).toThrow(RangeError);
+  });
+
+  it("con la misma pista se comporta como moveClipTo", () => {
+    const tl = twoTrackTimeline();
+    expect(moveClipToTrack(tl, "video-2", "c", "video-2", secondsToTicks(7))).toEqual(
+      moveClipTo(tl, "video-2", "c", secondsToTicks(7)),
+    );
+  });
+
+  it("no muta la timeline de entrada", () => {
+    const tl = twoTrackTimeline();
+    const before = JSON.stringify(tl);
+    moveClipToTrack(tl, "video-1", "a", "video-2", 0);
+    expect(JSON.stringify(tl)).toBe(before);
   });
 });
 

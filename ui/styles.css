@@ -519,6 +519,55 @@ main {
   cursor: grabbing;
 }
 
+/* Filtros propios del usuario (ver CUSTOM_FILTERS_STORAGE_KEY en ui/main.ts): chip arrastrable + botón × para borrarlo. */
+.effect-subheading {
+  margin-top: 0.4rem;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.custom-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.custom-filter-list:empty {
+  display: none;
+}
+
+.custom-filter-item {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.custom-filter-item .effect-chip {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-filter-item .custom-filter-delete {
+  flex: 0 0 auto;
+  padding-inline: 0.55rem;
+}
+
+.save-filter-row {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.save-filter-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* --- Secciones plegables del panel lateral: cada una es su propia "tarjeta", para que se lean como compartimentos separados en vez de un único bloque largo. --- */
 
 .panel-section {

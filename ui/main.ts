@@ -23,6 +23,7 @@ import {
   setClipChromaKey,
   setClipColorFilter,
   setClipColorGrade,
+  isNeutralColorGrade,
   setClipFlagged,
   setClipVideoHidden,
   setMasterAudio,
@@ -184,13 +185,15 @@ const gradeGainBInput = requireElement<HTMLInputElement>("#grade-gain-b");
 const gradeSaturationInput = requireElement<HTMLInputElement>("#grade-saturation");
 const gradeContrastInput = requireElement<HTMLInputElement>("#grade-contrast");
 const gradeInvertInput = requireElement<HTMLInputElement>("#grade-invert");
-const applyGradeButton = requireElement<HTMLButtonElement>("#apply-grade");
 const resetGradeButton = requireElement<HTMLButtonElement>("#reset-grade");
 const chromaEnabledInput = requireElement<HTMLInputElement>("#chroma-enabled");
 const chromaColorInput = requireElement<HTMLInputElement>("#chroma-color");
 const chromaSimilarityInput = requireElement<HTMLInputElement>("#chroma-similarity");
 const chromaSmoothnessInput = requireElement<HTMLInputElement>("#chroma-smoothness");
-const applyChromaButton = requireElement<HTMLButtonElement>("#apply-chroma");
+const customFilterNameInput = requireElement<HTMLInputElement>("#custom-filter-name");
+const saveCustomFilterButton = requireElement<HTMLButtonElement>("#save-custom-filter");
+const customFilterList = requireElement<HTMLElement>("#custom-filter-list");
+const customFilterEmptyHint = requireElement<HTMLElement>("#custom-filter-empty");
 const masterAudioControls = requireElement<HTMLFieldSetElement>("#master-audio-controls");
 const masterAudioEnabledInput = requireElement<HTMLInputElement>("#master-audio-enabled");
 const masterEqLowInput = requireElement<HTMLInputElement>("#master-eq-low");
@@ -527,6 +530,7 @@ function afterHistoryChange(): void {
     clipMutedInput.checked = found.clip.muted;
     clipVideoHiddenInput.checked = found.clip.videoHidden ?? false;
     clipColorFilterSelect.value = found.clip.colorFilter ?? "";
+    syncGradePanel(found.clip); // el grading se guarda solo al soltar cada barra: deshacer tiene que devolver las barras a su sitio
   }
   void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
   updateHistoryButtons();
@@ -1550,6 +1554,23 @@ function handleEffectDrop(event: DragEvent, trackId: string, clipId: string): vo
     selectClipRef(trackId, clipId);
     void seekToTimelineTicks(playheadTicks); // repinta el preview YA con el filtro nuevo, sin esperar al próximo scrub/play
     status.textContent = "Filtro de color aplicado.";
+    return;
+  }
+
+  if (payload.kind === "customFilter") {
+    const filter = customFilters.find((f) => f.id === payload.value);
+    if (!filter) return;
+    if (clip.kind !== "clip") {
+      status.textContent = "Los filtros de color solo se pueden aplicar a clips de vídeo.";
+      return;
+    }
+    // Un solo paso de historial para el look completo (preset + grading).
+    const withPreset = setClipColorFilter(timeline, trackId, clipId, filter.colorFilter);
+    commitTimeline(setClipColorGrade(withPreset, trackId, clipId, isNeutralColorGrade(filter.colorGrade) ? undefined : filter.colorGrade));
+    refreshTimelineLayout();
+    selectClipRef(trackId, clipId);
+    void seekToTimelineTicks(playheadTicks);
+    status.textContent = `Filtro «${filter.name}» aplicado.`;
   }
 }
 
@@ -2440,11 +2461,10 @@ function readChromaFromForm(): ChromaKey {
 /**
  * Previsualización en vivo mientras se arrastra un slider de grading o
  * croma: pinta el fotograma actual con los valores del panel SIN
- * escribirlos en el clip (eso solo pasa al pulsar "Aplicar", ver
- * applyGradeSettings/applyChromaSettings). Al reproducir o cambiar de
- * clip, activeColorGrade/activeChromaKey se vuelven a poner desde el
- * valor guardado del clip, así que la previsualización se descarta sola
- * si no se aplica.
+ * escribirlos todavía en el clip — eso pasa solo al soltar la barra
+ * (evento `change`, ver commitGradeFromForm/commitChromaFromForm), sin
+ * botón "Aplicar" (pedido explícito del 2026-10-01). Así un arrastre
+ * entero es UN paso de historial, no uno por cada `input`.
  */
 const previewGradeLive = throttleToFrame(() => {
   if (!timeline || !selectedClip || activeSegment) return;
@@ -2453,11 +2473,18 @@ const previewGradeLive = throttleToFrame(() => {
   void seekToTimelineTicks(playheadTicks);
 });
 
-for (const id of GRADE_SLIDER_IDS.concat(["grade-invert", "chroma-enabled", "chroma-color"])) {
+const GRADE_INPUT_IDS = GRADE_SLIDER_IDS.filter((id) => id.startsWith("grade-")).concat(["grade-invert"]);
+const CHROMA_INPUT_IDS = GRADE_SLIDER_IDS.filter((id) => id.startsWith("chroma-")).concat(["chroma-enabled", "chroma-color"]);
+
+for (const id of GRADE_INPUT_IDS.concat(CHROMA_INPUT_IDS)) {
   const el = document.getElementById(id);
   el?.addEventListener("input", () => {
     refreshGradeOutputs();
     previewGradeLive();
+  });
+  el?.addEventListener("change", () => {
+    if (GRADE_INPUT_IDS.includes(id)) commitGradeFromForm();
+    else commitChromaFromForm();
   });
 }
 
@@ -2480,12 +2507,15 @@ function numberOr(raw: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function applyGradeSettings(): void {
+/** Guarda en el clip seleccionado el grading del panel (al soltar una barra). Un grading neutro se guarda como "sin grading". No hace nada si no cambió. */
+function commitGradeFromForm(): void {
   const found = findClipRef(selectedClip);
-  if (!timeline || !found) return;
-  commitTimeline(setClipColorGrade(timeline, found.track.id, found.clip.id, readGradeFromForm()));
+  if (!timeline || !found || found.clip.kind !== "clip") return;
+  const formGrade = readGradeFromForm();
+  const next = isNeutralColorGrade(formGrade) ? undefined : formGrade;
+  if (JSON.stringify(next) === JSON.stringify(found.clip.colorGrade)) return;
+  commitTimeline(setClipColorGrade(timeline, found.track.id, found.clip.id, next));
   void seekToTimelineTicks(playheadTicks);
-  status.textContent = "Grading aplicado.";
 }
 
 function resetGradeSettings(): void {
@@ -2497,17 +2527,138 @@ function resetGradeSettings(): void {
   status.textContent = "Grading restablecido.";
 }
 
-function applyChromaSettings(): void {
+/** Igual que commitGradeFromForm, para el croma. */
+function commitChromaFromForm(): void {
   const found = findClipRef(selectedClip);
-  if (!timeline || !found) return;
-  commitTimeline(setClipChromaKey(timeline, found.track.id, found.clip.id, readChromaFromForm()));
+  if (!timeline || !found || found.clip.kind !== "clip") return;
+  const next = readChromaFromForm();
+  if (JSON.stringify(next) === JSON.stringify(found.clip.chromaKey ?? NEUTRAL_CHROMA_KEY)) return;
+  const wasEnabled = found.clip.chromaKey?.enabled ?? false;
+  commitTimeline(setClipChromaKey(timeline, found.track.id, found.clip.id, next));
   void seekToTimelineTicks(playheadTicks);
-  status.textContent = "Croma aplicado — se compone sobre la pista de abajo solo al exportar.";
+  if (next.enabled && !wasEnabled) {
+    status.textContent = "Croma activado — se compone sobre la pista de abajo solo al exportar.";
+  }
 }
 
-applyGradeButton.addEventListener("click", applyGradeSettings);
 resetGradeButton.addEventListener("click", resetGradeSettings);
-applyChromaButton.addEventListener("click", applyChromaSettings);
+
+// --- Filtros de color propios del usuario (pedido explícito del 2026-10-01) ---
+//
+// Un "filtro propio" es un look con nombre: el grading del panel + el
+// preset CSS que tuviera el clip. Se guarda por equipo (localStorage),
+// como el tema, no en el proyecto: al soltarlo sobre un clip se COPIAN
+// sus valores en clip.colorGrade/colorFilter, así que un proyecto nunca
+// depende de que el filtro siga existiendo en esta máquina.
+
+interface CustomColorFilter {
+  id: string;
+  name: string;
+  colorFilter?: ColorFilterType;
+  colorGrade: ColorGrade;
+}
+
+const CUSTOM_FILTERS_STORAGE_KEY = "appVideo.customFilters";
+const GRADE_NUMBER_KEYS = Object.keys(NEUTRAL_COLOR_GRADE).filter((k) => k !== "invert") as (keyof ColorGrade)[];
+
+function isCustomColorFilter(value: unknown): value is CustomColorFilter {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const grade = v.colorGrade as Record<string, unknown> | undefined;
+  const validPresets = Array.from(clipColorFilterSelect.options, (o) => o.value).filter(Boolean);
+  return (
+    typeof v.id === "string" &&
+    typeof v.name === "string" &&
+    (v.colorFilter === undefined || (typeof v.colorFilter === "string" && validPresets.includes(v.colorFilter))) &&
+    typeof grade === "object" &&
+    grade !== null &&
+    typeof grade.invert === "boolean" &&
+    GRADE_NUMBER_KEYS.every((k) => typeof grade[k] === "number" && Number.isFinite(grade[k]))
+  );
+}
+
+function loadCustomFilters(): CustomColorFilter[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(CUSTOM_FILTERS_STORAGE_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter(isCustomColorFilter) : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeCustomFilters(filters: CustomColorFilter[]): void {
+  try {
+    localStorage.setItem(CUSTOM_FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  } catch {
+    /* sin almacenamiento (modo privado, etc.): el filtro vale para esta sesión */
+  }
+}
+
+let customFilters = loadCustomFilters();
+
+function renderCustomFilters(): void {
+  customFilterList.innerHTML = "";
+  for (const filter of customFilters) {
+    const item = document.createElement("div");
+    item.className = "custom-filter-item";
+
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "effect-chip";
+    chip.draggable = true;
+    chip.dataset.effectKind = "customFilter";
+    chip.dataset.effectValue = filter.id;
+    chip.textContent = filter.name;
+    chip.title = "Arrastra a un clip para aplicarlo";
+    wireEffectChipDrag(chip);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "custom-filter-delete";
+    remove.textContent = "×";
+    remove.title = `Borrar el filtro «${filter.name}»`;
+    remove.addEventListener("click", () => {
+      customFilters = customFilters.filter((f) => f.id !== filter.id);
+      storeCustomFilters(customFilters);
+      renderCustomFilters();
+      status.textContent = `Filtro «${filter.name}» borrado (los clips que ya lo usan no cambian).`;
+    });
+
+    item.append(chip, remove);
+    customFilterList.appendChild(item);
+  }
+  customFilterEmptyHint.hidden = customFilters.length > 0;
+}
+
+function saveCustomFilterFromPanel(): void {
+  const found = findClipRef(selectedClip);
+  const grade = readGradeFromForm();
+  const preset = clipColorFilterSelect.value ? (clipColorFilterSelect.value as ColorFilterType) : undefined;
+  if (isNeutralColorGrade(grade) && !preset) {
+    status.textContent = "Ajusta antes el grading (o elige un preset) — un filtro neutro no cambiaría nada.";
+    return;
+  }
+  const name = customFilterNameInput.value.trim() || `Filtro ${customFilters.length + 1}`;
+  const existing = customFilters.find((f) => f.name.toLowerCase() === name.toLowerCase());
+  const filter: CustomColorFilter = {
+    id: existing?.id ?? `filter-${Date.now().toString(36)}`,
+    name,
+    colorGrade: grade,
+    ...(preset ? { colorFilter: preset } : {}),
+  };
+  // Mismo nombre = sobrescribir (forma natural de "editar" un filtro propio).
+  customFilters = existing ? customFilters.map((f) => (f.id === existing.id ? filter : f)) : [...customFilters, filter];
+  storeCustomFilters(customFilters);
+  renderCustomFilters();
+  customFilterNameInput.value = "";
+  if (found) commitGradeFromForm(); // por si la última barra aún no había disparado `change`
+  status.textContent = existing ? `Filtro «${name}» actualizado.` : `Filtro «${name}» guardado en el panel de efectos.`;
+}
+
+saveCustomFilterButton.addEventListener("click", saveCustomFilterFromPanel);
+customFilterNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") saveCustomFilterFromPanel();
+});
 
 function removeClipRef(trackId: string, clipId: string): void {
   if (!timeline) return;
@@ -2987,7 +3138,7 @@ insertTransitionButton.addEventListener("click", () => {
 // solo hace falta cablear el origen del arrastre una vez — el destino
 // (cada clip de la línea de tiempo) se cablea en renderVideoLaneClips(),
 // ya que esos elementos se recrean en cada repintado.
-document.querySelectorAll<HTMLElement>(".effect-chip").forEach((chip) => {
+function wireEffectChipDrag(chip: HTMLElement): void {
   chip.addEventListener("dragstart", (event) => {
     const kind = chip.dataset.effectKind;
     const value = chip.dataset.effectValue;
@@ -2995,7 +3146,9 @@ document.querySelectorAll<HTMLElement>(".effect-chip").forEach((chip) => {
     event.dataTransfer.setData(EFFECT_DND_MIME, JSON.stringify({ kind, value }));
     event.dataTransfer.effectAllowed = "copy";
   });
-});
+}
+document.querySelectorAll<HTMLElement>(".effect-chip").forEach(wireEffectChipDrag);
+renderCustomFilters(); // los chips de "Mis filtros" se crean aquí y se cablean uno a uno
 
 playButton.addEventListener("click", playFromPlayhead);
 pauseButton.addEventListener("click", stopPlayback);

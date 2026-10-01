@@ -232,6 +232,28 @@ separado porque son independientes entre sí:
   perfecta que la exportación ya proporciona. Documentado explícitamente
   en la UI (panel de croma), no un olvido.
 
+**Filtros de color propios y grading sin "Aplicar" — ampliación pedida
+explícitamente el 2026-10-01.** Además de los 6 presets fijos, el
+usuario puede guardar sus propios filtros: botón "Guardar como filtro"
+(con nombre) en la subsección Grading del inspector. Un filtro propio
+es un look con nombre = el `ColorGrade` del panel + el preset
+`colorFilter` que tuviera el clip. Aparece como chip arrastrable en
+"Mis filtros" (panel de efectos, carpeta Filtros de color), con × para
+borrarlo; mismo nombre = sobrescribir. Se guarda POR EQUIPO en
+`localStorage` (`appVideo.customFilters`, como el tema), no en el
+proyecto: soltarlo sobre un clip COPIA sus valores en
+`clip.colorGrade`/`clip.colorFilter` (un solo paso de historial), así
+que un proyecto nunca depende de que el filtro exista en otra máquina
+— sin cambios en `/core`, `/media` ni `/export`. Todo en `ui/main.ts`
+(`CustomColorFilter`, `renderCustomFilters`, `saveCustomFilterFromPanel`,
+rama `customFilter` de `handleEffectDrop`).
+Los botones "Aplicar" de grading y croma desaparecen: mientras se
+arrastra una barra se previsualiza (`input`, `previewGradeLive`, igual
+que antes) y al soltarla (`change`) se guarda en el clip
+(`commitGradeFromForm`/`commitChromaFromForm`) — un arrastre = un paso
+de historial, no uno por cada `input`. Deshacer resincroniza las barras
+(`afterHistoryChange` → `syncGradePanel`).
+
 **Bandera de clip (`Clip.flagged`) — ampliación pedida explícitamente el
 2026-08-30.** Estilo DaVinci Resolve: la tecla `G` (y el botón `G` de
 la barra de la timeline) marca/desmarca el clip seleccionado. Es solo
@@ -393,10 +415,9 @@ menú), sin tocar `/core`, `/media` ni `/export`:
   **previsualización en vivo**: al arrastrar un slider de grading/croma
   se pinta el fotograma actual con `activeColorGrade`/`activeChromaKey`
   leídos del panel (`previewGradeLive`, throttled a fotograma) SIN
-  escribirlos en el clip — eso sigue pasando solo con "Aplicar"
-  (`applyGradeSettings`/`applyChromaSettings`), el modelo de historial
-  no cambia. Si no se aplica, el siguiente `seekToTimelineTicks`/play
-  restaura los valores guardados del clip.
+  escribirlos en el clip mientras dura el arrastre; al soltar la barra
+  se guardan solos (desde el 2026-10-01 ya no hay botón "Aplicar" —
+  ver "Filtros de color propios y grading sin Aplicar" en Alcance).
 
 - **Modo oscuro con interruptor** (pedido explícito del 2026-09-30).
   Botón ☾/☀ en la cabecera (`#theme-toggle-button`, junto a `?`) y

@@ -113,6 +113,11 @@
             <button type="button" class="effect-chip" draggable="true" data-effect-kind="colorFilter" data-effect-value="highContrast">
               Alto contraste
             </button>
+            <span class="effect-subheading">Mis filtros</span>
+            <div id="custom-filter-list" class="custom-filter-list"></div>
+            <p id="custom-filter-empty" class="hint-inline">
+              Ajusta el grading de un clip y pulsa «Guardar como filtro» para crear uno propio.
+            </p>
           </div>
         </details>
       </aside>
@@ -246,12 +251,19 @@
                   </div>
                   <label class="checkbox-row"><input id="grade-invert" type="checkbox" /> Invertir</label>
                   <div class="toolbar-inline" style="margin-top: 0.5rem; gap: 0.4rem">
-                    <button id="apply-grade" type="button" class="primary">Aplicar</button>
                     <button id="reset-grade" type="button">Restablecer</button>
                   </div>
                   <p class="hint-inline">
-                    Corrección real por canal (fórmula ASC CDL). La previsualización se actualiza mientras
-                    arrastras; el clip solo guarda los valores al pulsar «Aplicar».
+                    Corrección real por canal (fórmula ASC CDL). Los cambios se ven mientras arrastras y se
+                    guardan en el clip al soltar la barra (Ctrl+Z los deshace).
+                  </p>
+                  <div class="save-filter-row">
+                    <input id="custom-filter-name" type="text" placeholder="Nombre del filtro" maxlength="40" />
+                    <button id="save-custom-filter" type="button" class="primary">Guardar como filtro</button>
+                  </div>
+                  <p class="hint-inline">
+                    Guarda el grading actual (y el preset, si tiene) como filtro propio en el panel de
+                    efectos, para arrastrarlo a otros clips.
                   </p>
                 </div>
               </details>
@@ -271,7 +283,6 @@
                     <input id="chroma-smoothness" type="range" min="0.01" max="1" step="0.01" value="0.1" />
                     <output id="chroma-smoothness-val">0.10</output>
                   </div>
-                  <button id="apply-chroma" type="button" class="primary" style="margin-top: 0.5rem">Aplicar croma</button>
                   <p class="hint-inline">
                     Solo se compone sobre la pista de abajo en la EXPORTACIÓN — la previsualización muestra el
                     recorte sobre negro (limitación del motor de reproducción, no un fallo).

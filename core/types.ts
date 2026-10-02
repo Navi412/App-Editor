@@ -62,6 +62,68 @@ export interface ColorGrade {
   /** 1 = neutro, pivota sobre 0.5. */
   contrast: number;
   invert: boolean;
+  // Mandos "tipo Lightroom" ENCIMA del CDL — ampliación pedida
+  // explícitamente el 2026-10-02. Exposición y balance de blancos se
+  // aplican antes del CDL (actúan sobre la señal de entrada, como en una
+  // cámara); sombras/luces después (ver media/colorGradeGL.ts). Los
+  // proyectos/filtros guardados antes no los tienen: normalizeColorGrade
+  // (core/color.ts) los rellena con su valor neutro al leerlos.
+  /** Pasos de diafragma (stops), -3..3. 0 = neutro. */
+  exposure: number;
+  /** -1 (frío/azul) .. 1 (cálido/ámbar). 0 = neutro. */
+  temperature: number;
+  /** -1 (verde) .. 1 (magenta). 0 = neutro. */
+  tint: number;
+  /** -1..1: levanta (+) o hunde (-) las sombras sin tocar las luces. 0 = neutro. */
+  shadows: number;
+  /** -1..1: empuja (+) o recupera (-) las luces sin tocar las sombras. 0 = neutro. */
+  highlights: number;
+  /** Curvas RGB (ver ColorCurves). undefined = sin curvas (identidad). */
+  curves?: ColorCurves;
+}
+
+/** Punto de una curva de color, ambos ejes 0-1 (entrada → salida). */
+export interface CurvePoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Curvas de color (ampliación pedida explícitamente el 2026-10-02):
+ * `master` actúa sobre los tres canales y después cada canal pasa por la
+ * suya — `out_c = curva_c(master(in_c))`. Cada lista va ordenada por `x`
+ * y siempre incluye los extremos x=0 y x=1; solo (0,0)-(1,1) es la
+ * identidad. Interpolación monótona (Fritsch-Carlson, ver evaluateCurve
+ * en core/color.ts): nunca "rebota" por encima/debajo de los puntos como
+ * lo haría un spline cúbico natural.
+ */
+export interface ColorCurves {
+  master: CurvePoint[];
+  r: CurvePoint[];
+  g: CurvePoint[];
+  b: CurvePoint[];
+}
+
+/**
+ * LUT 3D importada de un archivo `.cube` (estándar de cámaras y
+ * coloristas) — ampliación pedida explícitamente el 2026-10-02. Vive en
+ * `Timeline.luts` (registro del proyecto, como las fuentes) y los clips
+ * la referencian por id (`Clip.lut`), igual que un Clip referencia un
+ * SourceFile por `sourceId`: nunca se copian los datos en cada clip.
+ * `data` son tripletas RGB 0-1 en el orden del propio .cube (R varía más
+ * rápido, luego G, luego B), longitud size³·3.
+ */
+export interface LutAsset {
+  id: string;
+  name: string;
+  size: number;
+  data: Float32Array;
+}
+
+/** Aplicación de una LUT del registro a un clip. `intensity` 0-1 mezcla entre la imagen sin LUT (0) y con la LUT completa (1). */
+export interface ClipLut {
+  lutId: string;
+  intensity: number;
 }
 
 export const NEUTRAL_COLOR_GRADE: ColorGrade = {
@@ -77,6 +139,11 @@ export const NEUTRAL_COLOR_GRADE: ColorGrade = {
   saturation: 1,
   contrast: 1,
   invert: false,
+  exposure: 0,
+  temperature: 0,
+  tint: 0,
+  shadows: 0,
+  highlights: 0,
 };
 
 /**
@@ -179,6 +246,8 @@ export interface Clip {
   colorGrade?: ColorGrade;
   /** Solo relevante si kind === "clip". undefined = sin croma. Ver ChromaKey. */
   chromaKey?: ChromaKey;
+  /** Solo relevante si kind === "clip". undefined = sin LUT. Ver LutAsset/ClipLut. */
+  lut?: ClipLut;
   /**
    * Bandera del clip (estilo DaVinci Resolve: tecla G) — un simple
    * marcador visual "este clip me interesa", sin efecto en la
@@ -246,4 +315,6 @@ export interface Timeline {
   outputFrameRate: FrameRate;
   /** undefined = sin procesado de máster (comportamiento de siempre). Ver MasterAudio. */
   masterAudio?: MasterAudio;
+  /** Registro de LUTs 3D importadas en el proyecto (ver LutAsset). undefined/[] = ninguna. */
+  luts?: LutAsset[];
 }

@@ -171,7 +171,7 @@
                 <span class="field-group-label">Audio del clip</span>
                 <label class="checkbox-row"><input id="clip-muted" type="checkbox" /> Silenciar (solo vídeo)</label>
                 <label class="checkbox-row"><input id="clip-video-hidden" type="checkbox" /> Ocultar vídeo (solo audio)</label>
-                <p class="hint-inline">Volumen: arrastra la pista de audio abajo · Alt+clic ahí para editarlo por trozos.</p>
+                <p class="hint-inline">Volumen: arrastra la línea naranja del audio en la timeline · Alt+clic ahí para editarlo por trozos.</p>
               </div>
 
               <div class="field-group">
@@ -192,8 +192,35 @@
               </div>
 
               <details class="sub-section" id="grade-sub">
-                <summary>Grading avanzado (lift / gamma / gain)</summary>
+                <summary>Grading (luz, balance, lift / gamma / gain)</summary>
                 <div class="sub-section-body">
+                  <span class="field-group-label">Básico</span>
+                  <div class="slider-row">
+                    <span>Exposición</span>
+                    <input id="grade-exposure" type="range" min="-3" max="3" step="0.05" value="0" />
+                    <output id="grade-exposure-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Temperatura</span>
+                    <input id="grade-temperature" class="range-temperature" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-temperature-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Tinte</span>
+                    <input id="grade-tint" class="range-tint" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-tint-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Sombras</span>
+                    <input id="grade-shadows" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-shadows-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Luces</span>
+                    <input id="grade-highlights" type="range" min="-1" max="1" step="0.01" value="0" />
+                    <output id="grade-highlights-val">0</output>
+                  </div>
+                  <span class="field-group-label">Primarias (ASC CDL)</span>
                   <div class="slider-row">
                     <span>Lift R</span>
                     <input id="grade-lift-r" type="range" min="-1" max="1" step="0.01" value="0" />
@@ -264,6 +291,52 @@
                   <p class="hint-inline">
                     Guarda el grading actual (y el preset, si tiene) como filtro propio en el panel de
                     efectos, para arrastrarlo a otros clips.
+                  </p>
+                </div>
+              </details>
+
+              <details class="sub-section" id="curves-sub">
+                <summary>Curvas</summary>
+                <div class="sub-section-body">
+                  <div class="curve-channels" role="group" aria-label="Canal de la curva">
+                    <button type="button" class="curve-channel is-active" data-channel="master">Y</button>
+                    <button type="button" class="curve-channel" data-channel="r">R</button>
+                    <button type="button" class="curve-channel" data-channel="g">G</button>
+                    <button type="button" class="curve-channel" data-channel="b">B</button>
+                  </div>
+                  <canvas id="curve-editor" class="curve-editor" width="240" height="240"></canvas>
+                  <div class="toolbar-inline" style="margin-top: 0.5rem; gap: 0.4rem">
+                    <button id="reset-curve-channel" type="button">Restablecer canal</button>
+                    <button id="reset-curves" type="button">Restablecer todas</button>
+                  </div>
+                  <p class="hint-inline">
+                    Clic para añadir un punto y arrástralo · doble clic sobre un punto para quitarlo. Y actúa sobre
+                    los tres canales; R/G/B, sobre cada uno.
+                  </p>
+                </div>
+              </details>
+
+              <details class="sub-section" id="lut-sub">
+                <summary>LUT (.cube)</summary>
+                <div class="sub-section-body">
+                  <label
+                    >LUT del clip
+                    <select id="clip-lut-select">
+                      <option value="">Ninguna</option>
+                    </select>
+                  </label>
+                  <div class="slider-row">
+                    <span>Intensidad</span>
+                    <input id="clip-lut-intensity" type="range" min="0" max="1" step="0.01" value="1" />
+                    <output id="clip-lut-intensity-val">1</output>
+                  </div>
+                  <div class="toolbar-inline" style="margin-top: 0.5rem; gap: 0.4rem">
+                    <button id="import-lut-button" type="button">Importar .cube…</button>
+                    <button id="remove-lut-button" type="button">Quitar del proyecto</button>
+                  </div>
+                  <input id="lut-file-input" type="file" accept=".cube" hidden />
+                  <p class="hint-inline">
+                    La LUT se guarda dentro del proyecto. Se aplica después del grading y las curvas.
                   </p>
                 </div>
               </details>
@@ -468,12 +541,20 @@
           </div>
         </div>
         <div class="timeline-body">
+          <!-- Timeline dibujada en canvas (2026-10-02): #timeline-scroll da las
+               barras de scroll nativas; #timeline-content solo tiene el tamaño
+               total (para que haya algo que desplazar). Dentro, la columna de
+               gutters (DOM: nombre editable, ojo/mute, menú ⋮) y el canvas, que
+               se queda fijo (sticky) en la parte visible y se repinta según el
+               scroll — ver ui/timelineCanvas.ts. -->
           <div id="timeline-scroll" class="timeline-scroll">
             <div id="timeline-content" class="timeline-content">
-              <div id="timeline-ruler" class="timeline-ruler"></div>
-              <div id="timeline-tracks" class="timeline-tracks"></div>
-              <div id="timeline-text-track" class="timeline-text-track"></div>
-              <div id="timeline-playhead" class="timeline-playhead"></div>
+              <div id="timeline-gutters" class="timeline-gutters"></div>
+              <div id="timeline-canvas-area" class="timeline-canvas-area">
+                <div class="timeline-canvas-sticky">
+                  <canvas id="timeline-canvas" class="timeline-canvas"></canvas>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -496,7 +577,14 @@
         <li><span>Imán / snapping (on/off)</span><kbd>N</kbd></li>
         <li><span>Bandera en el clip seleccionado</span><kbd>G</kbd></li>
         <li><span>Añadir marcador</span><kbd>M</kbd></li>
-        <li><span>Eliminar clip o texto seleccionado</span><kbd>Supr</kbd></li>
+        <li><span>Eliminar clip(s) o texto seleccionado</span><kbd>Supr</kbd></li>
+        <li><span>Eliminar cerrando el hueco (ripple delete)</span><kbd>Mayús</kbd>+<kbd>Supr</kbd></li>
+        <li><span>Añadir / quitar un clip de la selección</span><kbd>Ctrl</kbd>+clic · <kbd>Mayús</kbd>+clic</li>
+        <li><span>Seleccionar con recuadro</span>arrastrar en una zona vacía de las pistas</li>
+        <li><span>Slip (deslizar el contenido sin mover el clip)</span><kbd>Alt</kbd>+arrastre</li>
+        <li><span>Duplicar clip(s)</span><kbd>Ctrl</kbd>+<kbd>D</kbd></li>
+        <li><span>Copiar / cortar / pegar en el playhead</span><kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd></li>
+        <li><span>Seleccionar todos los clips</span><kbd>Ctrl</kbd>+<kbd>A</kbd></li>
         <li><span>Fotograma anterior / siguiente</span><kbd>←</kbd> <kbd>→</kbd></li>
         <li><span>Ir al inicio / final</span><kbd>Inicio</kbd> <kbd>Fin</kbd></li>
         <li><span>Deshacer / Rehacer</span><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></li>

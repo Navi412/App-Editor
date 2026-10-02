@@ -1,6 +1,7 @@
+import { normalizeColorGrade, parseCubeLut, serializeCubeLut } from "./color";
 import type { FrameRate } from "./time";
 import type { TextOverlay } from "./textOverlay";
-import type { ChromaKey, Clip, ColorGrade, MasterAudio, Resolution, SourceFile, Timeline, Track, TrackKind, VolumeKeyframe } from "./types";
+import type { ChromaKey, Clip, ClipLut, ColorGrade, LutAsset, MasterAudio, Resolution, SourceFile, Timeline, Track, TrackKind, VolumeKeyframe } from "./types";
 
 /** Marcador de anotación en la timeline — no afecta al render, solo navegación. */
 export interface Marker {
@@ -45,6 +46,19 @@ export interface ProjectFile {
   textOverlays: TextOverlay[];
   /** undefined = sin procesado de máster configurado — ver MasterAudio en types.ts. Ampliación de alcance pedida explícitamente el 2026-08-29. */
   masterAudio?: MasterAudio;
+  /** LUTs 3D del proyecto (ver LutAsset en types.ts), guardadas como el propio texto .cube — ampliación del 2026-10-02. El proyecto es autocontenido: no depende de que el .cube siga en disco. */
+  luts?: ProjectLut[];
+}
+
+export interface ProjectLut {
+  id: string;
+  name: string;
+  cube: string;
+}
+
+/** LUTs del proyecto ya parseadas, listas para `Timeline.luts`. */
+export function projectLutAssets(project: ProjectFile): LutAsset[] {
+  return (project.luts ?? []).map((lut) => parseCubeLut(lut.cube, lut.id, lut.name));
 }
 
 export function serializeProject(
@@ -62,6 +76,9 @@ export function serializeProject(
     markers,
     textOverlays,
     ...(timeline.masterAudio ? { masterAudio: timeline.masterAudio } : {}),
+    ...(timeline.luts && timeline.luts.length > 0
+      ? { luts: timeline.luts.map((lut) => ({ id: lut.id, name: lut.name, cube: serializeCubeLut(lut) })) }
+      : {}),
   };
 }
 
@@ -142,26 +159,25 @@ interface RawClip {
   colorFilter?: string;
   colorGrade?: ColorGrade;
   chromaKey?: ChromaKey;
+  lut?: ClipLut;
   flagged?: boolean;
 }
 
+/** Acepta gradings guardados antes del 2026-10-02 (sin exposición/temperatura/curvas...) — normalizeColorGrade rellena lo que falte. */
 function isColorGrade(value: unknown): value is ColorGrade {
+  return normalizeColorGrade(value) !== undefined;
+}
+
+function isClipLut(value: unknown): value is ClipLut {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
-  return (
-    isFiniteNumber(v.liftR) &&
-    isFiniteNumber(v.liftG) &&
-    isFiniteNumber(v.liftB) &&
-    isFiniteNumber(v.gammaR) &&
-    isFiniteNumber(v.gammaG) &&
-    isFiniteNumber(v.gammaB) &&
-    isFiniteNumber(v.gainR) &&
-    isFiniteNumber(v.gainG) &&
-    isFiniteNumber(v.gainB) &&
-    isFiniteNumber(v.saturation) &&
-    isFiniteNumber(v.contrast) &&
-    typeof v.invert === "boolean"
-  );
+  return typeof v.lutId === "string" && isFiniteNumber(v.intensity);
+}
+
+function isProjectLut(value: unknown): value is ProjectLut {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === "string" && typeof v.name === "string" && typeof v.cube === "string";
 }
 
 function isChromaKey(value: unknown): value is ChromaKey {
@@ -197,6 +213,7 @@ function isRawClip(value: unknown): value is RawClip {
     (v.colorFilter === undefined || (typeof v.colorFilter === "string" && COLOR_FILTER_TYPES.has(v.colorFilter))) &&
     (v.colorGrade === undefined || isColorGrade(v.colorGrade)) &&
     (v.chromaKey === undefined || isChromaKey(v.chromaKey)) &&
+    (v.lut === undefined || isClipLut(v.lut)) &&
     (v.flagged === undefined || typeof v.flagged === "boolean")
   );
 }
@@ -236,8 +253,9 @@ function migrateClipsRipple(rawClips: RawClip[]): Clip[] {
       if (raw.transitionType) normalized.transitionType = raw.transitionType as NonNullable<Clip["transitionType"]>;
       if (raw.volumeKeyframes) normalized.volumeKeyframes = raw.volumeKeyframes;
       if (raw.colorFilter) normalized.colorFilter = raw.colorFilter as NonNullable<Clip["colorFilter"]>;
-      if (raw.colorGrade) normalized.colorGrade = raw.colorGrade;
+      if (raw.colorGrade) normalized.colorGrade = normalizeColorGrade(raw.colorGrade)!;
       if (raw.chromaKey) normalized.chromaKey = raw.chromaKey;
+      if (raw.lut) normalized.lut = raw.lut;
       if (raw.flagged) normalized.flagged = true;
       clips.push(normalized);
     }
@@ -358,6 +376,18 @@ export function parseProjectFile(data: unknown): ProjectFile {
       ? obj.textOverlays.map(normalizeTextOverlay)
       : [];
   const masterAudio = isMasterAudio(obj.masterAudio) ? obj.masterAudio : undefined;
+  if (obj.luts !== undefined && (!Array.isArray(obj.luts) || !obj.luts.every(isProjectLut))) {
+    throw new Error("La lista de LUTs del proyecto es inválida");
+  }
+  const luts = (obj.luts as ProjectLut[] | undefined) ?? [];
+  const lutIds = new Set(luts.map((l) => l.id));
+  for (const track of tracks) {
+    for (const clip of track.clips) {
+      if (clip.lut && !lutIds.has(clip.lut.lutId)) {
+        throw new Error(`El clip ${clip.id} usa una LUT que no está en el proyecto (${clip.lut.lutId})`);
+      }
+    }
+  }
 
   return {
     version: 1,
@@ -368,5 +398,6 @@ export function parseProjectFile(data: unknown): ProjectFile {
     markers,
     textOverlays,
     ...(masterAudio ? { masterAudio } : {}),
+    ...(luts.length > 0 ? { luts } : {}),
   };
 }

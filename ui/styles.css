@@ -877,11 +877,18 @@ kbd {
   width: 3.6rem;
 }
 
+/* El relieve hundido vive en .timeline-body, no en el contenedor con
+   scroll: el canvas es opaco y taparía una sombra interior pintada
+   debajo de él. */
 .timeline-body {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   align-items: stretch;
+  border-radius: var(--radius);
+  background: var(--lane);
+  box-shadow: var(--nm-inset);
+  padding: 4px;
 }
 
 /* Barra de la línea de tiempo reducida a lo esencial (pedido explícito
@@ -949,109 +956,103 @@ kbd {
   width: 100%;
 }
 
+/* --- Línea de tiempo en canvas (2026-10-02, ver ui/timelineCanvas.ts) ---
+   #timeline-scroll da las barras de scroll nativas. #timeline-content solo
+   tiene el tamaño total (lo fija JS) para que haya algo que desplazar.
+   Dentro, en fila: la columna de gutters (DOM, pegada a la izquierda con
+   sticky) y el área del canvas, cuyo <canvas> mide lo que la parte
+   VISIBLE y se queda fijo (sticky arriba e izquierda) — se repinta según
+   scrollLeft/scrollTop en vez de desplazarse. */
 .timeline-scroll {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  overflow-x: auto;
-  /* auto, no hidden: una vez que .timeline-section tiene una altura
-     fija (ver arriba), muchas pistas ya no caben todas a la vez —
-     necesitan su propio scroll vertical en vez de quedar recortadas. */
-  overflow-y: auto;
-  border: none;
-  border-radius: var(--radius);
+  overflow: auto;
+  border-radius: calc(var(--radius) - 4px);
   background: var(--lane);
-  box-shadow: var(--nm-inset);
-  padding: 3px;
 }
 
 .timeline-content {
   position: relative;
-  user-select: none;
-  /* el ancho real lo fija JS según el zoom y la duración total */
+  display: flex;
+  align-items: stretch;
   min-width: 100%;
+  min-height: 100%;
+  user-select: none;
 }
 
-.timeline-ruler {
-  height: 18px;
-  background: transparent;
-  border-bottom: 1px solid var(--border-strong);
-  cursor: pointer;
-  position: relative;
-}
-
-.timeline-ruler::before {
-  /* Bloque decorativo que marca el hueco del gutter (las marcas de
-     segundos, posicionadas desde JS con ese mismo desplazamiento —
-     TRACK_GUTTER_WIDTH_PX en ui/main.ts — nunca caen aquí encima), a
-     juego con el fondo de los gutters reales de las pistas, para que
-     se lea como una sola columna continua. */
-  content: "";
-  position: absolute;
+.timeline-gutters {
+  position: sticky;
   left: 0;
-  top: 0;
-  bottom: 0;
+  z-index: 4;
+  flex: 0 0 var(--track-gutter-width);
   width: var(--track-gutter-width);
   background: var(--surface);
   border-right: 1px solid var(--border-strong);
 }
 
-.timeline-ruler .ruler-mark {
-  position: absolute;
+/* Esquina sobre los gutters, a la altura de la regla: fija arriba al
+   desplazar en vertical, igual que la regla que pinta el canvas. */
+.timeline-gutter-corner {
+  position: sticky;
   top: 0;
-  bottom: 0;
-  border-left: 1px solid var(--border);
-  font-size: 10px;
-  color: var(--text-dim);
-  padding-left: 3px;
-  white-space: nowrap;
+  z-index: 5;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-strong);
 }
 
-/* --- Pistas (multipista: vídeo/audio, añadibles/quitables) --- */
-/* Ampliación de alcance pedida explícitamente el 2026-08-21 (ver
-   CLAUDE.md): cada pista es una fila con un "gutter" fijo a la
-   izquierda (nombre, ojo/mute, quitar) que se queda pegado al hacer
-   scroll horizontal (position: sticky respecto a #timeline-scroll,
-   que es el contenedor con overflow-x), y un "lane" que ocupa el resto
-   del ancho, donde los clips se posicionan de forma ABSOLUTA según su
-   `startTicks` — ya no hay huecos-bloque en el flujo, un hueco es
-   simplemente el tramo sin ningún .timeline-clip ahí. */
+.timeline-canvas-area {
+  position: relative;
+  flex: 1 0 auto;
+  min-width: 0;
+}
+
+/* Ancla de tamaño cero, pegada arriba a la izquierda de la zona
+   visible: el canvas cuelga de ella (overflow visible) sin ocupar sitio
+   en la maqueta — si ocupara su alto, sumaría scroll de más. */
+.timeline-canvas-sticky {
+  position: sticky;
+  top: 0;
+  left: var(--track-gutter-width);
+  width: 0;
+  height: 0;
+  overflow: visible;
+}
+
+.timeline-canvas {
+  display: block;
+  touch-action: none;
+}
+
 .timeline-tracks-empty-hint {
   color: var(--text-dim);
   padding: 0.6rem;
 }
 
-.timeline-track-group + .timeline-track-group {
-  border-top: 1px solid var(--border-strong);
-}
-
-.timeline-track-row {
-  display: flex;
-  align-items: stretch;
-  width: 100%;
-}
-
+/* Un gutter por fila del canvas, misma altura (la fija JS). */
 .timeline-track-gutter {
-  position: sticky;
-  left: 0;
-  z-index: 4;
-  flex: 0 0 var(--track-gutter-width);
-  /* Sin esto, el ancho mínimo automático de un elemento flex es el de
-     su contenido (nombre + 4 botones) — más ancho que
-     --track-gutter-width, así que el gutter se saldría de su
-     flex-basis y dejaría de alinear la regla/los clips con el resto
-     de filas. */
-  min-width: 0;
+  position: relative;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 0.2rem;
+  min-width: 0;
   padding: 0 0.3rem;
   background: var(--surface);
-  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.timeline-track-gutter.ends-group {
+  border-bottom-color: var(--border-strong);
 }
 
 .timeline-track-gutter--sub {
   background: var(--lane-sub);
+}
+
+.timeline-track-gutter--text {
+  background: var(--text-track);
 }
 
 .timeline-track-gutter .track-name {
@@ -1180,309 +1181,6 @@ kbd {
   background: var(--accent);
 }
 
-.timeline-track-lane {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  /* La altura la fija JS en línea, por fila — ver laneHeightPx/
-     attachRowResizeHandle en ui/main.ts (cada pista se redimensiona
-     por separado, "lo que se quiera"). Estos valores son solo el
-     respaldo antes de que JS la aplique. */
-  background: var(--lane);
-  cursor: pointer;
-}
-
-.timeline-track-lane--video {
-  height: 64px;
-}
-
-.timeline-track-lane--audio {
-  height: 36px;
-  background: var(--lane-audio);
-}
-
-.timeline-clip {
-  position: absolute;
-  top: 0;
-  height: 100%;
-  min-width: 28px;
-  background: var(--clip);
-  border-right: 1px solid rgba(18, 27, 45, 0.25);
-  border-radius: 7px;
-  padding: 4px 6px;
-  box-shadow: 2px 2px 5px var(--clip-shadow);
-  overflow: hidden;
-  cursor: grab;
-  color: #fff;
-}
-
-.timeline-clip:active {
-  cursor: grabbing;
-}
-
-.timeline-clip:not(.selected):hover {
-  outline: 1px solid var(--text-dim);
-  outline-offset: -1px;
-}
-
-.timeline-clip.selected {
-  /* background-color, no el shorthand `background`: este último
-     resetearía background-size/position a sus valores iniciales
-     (pisando el `cover`/`center` de más abajo, que tiene menos
-     especificidad) y la miniatura del clip se vería repetida en
-     mosaico en vez de cubrir el bloque — bug preexistente encontrado
-     verificando la Fase C de la ampliación multipista del 2026-08-21. */
-  background-color: var(--clip-selected);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.timeline-clip.drop-target {
-  outline: 2px dashed var(--accent);
-  outline-offset: -2px;
-}
-
-.timeline-clip .clip-name {
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.timeline-clip .clip-duration {
-  display: block;
-  font-size: 10.5px;
-  color: var(--text-dim);
-}
-
-/* Una transición no es "un clip más" en la fila: se dibuja más baja,
-   centrada verticalmente y con sombra propia para que se lea como un
-   marcador que va POR ENCIMA del corte entre los dos clips vecinos, no
-   como un tercer clip en igualdad de condiciones. Arrastrar su cuerpo
-   la alarga/acorta directamente — ver beginTransitionResizeDrag. */
-.timeline-clip--transition {
-  top: 10px;
-  height: 44px;
-  z-index: 2;
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  outline: none;
-  box-shadow: 0 3px 12px rgba(18, 27, 45, 0.28);
-  cursor: ew-resize;
-  background: repeating-linear-gradient(-45deg, #7b5cc4, #7b5cc4 6px, #6a4ab0 6px, #6a4ab0 12px);
-}
-
-.timeline-clip--transition:active {
-  cursor: ew-resize;
-}
-
-/* Clip.videoHidden ("solo audio", ver core/types.ts) — atenuado (la
-   miniatura y el filtro de color van por `style` inline con más
-   especificidad que cualquier propiedad de fondo/filter de esta clase,
-   así que `opacity` + una etiqueta en ::after son las únicas formas
-   fiables de marcarlo visualmente) y con una etiqueta "solo audio". */
-.timeline-clip--video-hidden {
-  opacity: 0.4;
-}
-
-/* Bandera del clip (tecla G) — franja superior de color, sin desplazar
-   el contenido (box-shadow, no border). */
-.timeline-clip--flagged {
-  box-shadow:
-    inset 0 4px 0 #f5a623,
-    2px 2px 5px var(--clip-shadow);
-}
-
-.timeline-clip--video-hidden::after {
-  content: "solo audio";
-  position: absolute;
-  left: 4px;
-  bottom: 2px;
-  font-size: 9px;
-  color: var(--text);
-  text-shadow: 0 1px 1px #000;
-  pointer-events: none;
-}
-
-.timeline-clip--transition.selected {
-  border-color: var(--text);
-  box-shadow:
-    0 3px 12px rgba(18, 27, 45, 0.28),
-    0 0 0 2px var(--accent);
-  /* .timeline-clip.selected pone un fondo azul plano con más especificidad
-     que el degradado rayado de abajo — se repite aquí para no perder el
-     patrón distintivo de "transición" al seleccionarla. */
-  background: repeating-linear-gradient(-45deg, #7b5cc4, #7b5cc4 6px, #6a4ab0 6px, #6a4ab0 12px);
-}
-
-.timeline-audio-cell {
-  position: absolute;
-  top: 0;
-  height: 100%;
-  border-right: 1px solid rgba(18, 27, 45, 0.18);
-  overflow: hidden;
-}
-
-.timeline-audio-cell canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.timeline-audio-cell.no-audio {
-  background: repeating-linear-gradient(
-    45deg,
-    rgba(18, 27, 45, 0.05),
-    rgba(18, 27, 45, 0.05) 4px,
-    rgba(18, 27, 45, 0.02) 4px,
-    rgba(18, 27, 45, 0.02) 8px
-  );
-}
-
-.timeline-audio-cell.has-volume {
-  cursor: ns-resize;
-}
-
-.timeline-audio-cell.selected {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.timeline-audio-cell:not(.selected):hover {
-  outline: 1px solid var(--text-dim);
-  outline-offset: -1px;
-}
-
-.timeline-audio-cell .volume-line {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: #e07a00;
-  pointer-events: none;
-  transform: translateY(-50%);
-}
-
-.timeline-audio-cell.muted .volume-line {
-  background: var(--text-dim);
-  opacity: 0.7;
-}
-
-.timeline-audio-cell .volume-label {
-  position: absolute;
-  top: 1px;
-  left: 3px;
-  font-size: 9px;
-  font-weight: 600;
-  color: #c96a00;
-  pointer-events: none;
-  text-shadow: 0 1px 2px var(--surface);
-}
-
-.timeline-audio-cell.muted .volume-label {
-  color: var(--text-dim);
-}
-
-.volume-svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-.volume-svg polyline {
-  fill: none;
-  stroke: #e07a00;
-  stroke-width: 2;
-  vector-effect: non-scaling-stroke;
-}
-
-.timeline-audio-cell.muted .volume-svg polyline {
-  stroke: var(--text-dim);
-  opacity: 0.7;
-}
-
-.volume-point {
-  position: absolute;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #e07a00;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 3px rgba(18, 27, 45, 0.35);
-  transform: translate(-50%, -50%);
-  cursor: ns-resize;
-  z-index: 2;
-}
-
-.volume-point:hover {
-  background: #f59021;
-}
-
-/* --- Pista de texto --- */
-
-.timeline-text-track {
-  position: relative;
-  height: 26px;
-  background: var(--text-track);
-  border-top: 1px solid var(--border-strong);
-}
-
-.timeline-text-clip {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  min-width: 10px;
-  background: linear-gradient(180deg, #8a63c0, #6f4aae);
-  border: 1px solid rgba(18, 27, 45, 0.2);
-  border-radius: 4px;
-  padding: 0 6px;
-  overflow: hidden;
-  cursor: grab;
-  display: flex;
-  align-items: center;
-  color: #fff;
-}
-
-.timeline-text-clip:active {
-  cursor: grabbing;
-}
-
-.timeline-text-clip.selected {
-  background: linear-gradient(180deg, #9a72d0, #7d57bd);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.timeline-text-clip .text-clip-label {
-  font-size: 10px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.timeline-playhead {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--playhead);
-  pointer-events: none;
-  left: 0;
-}
-
-.timeline-playhead::before {
-  content: "";
-  position: absolute;
-  top: -16px;
-  left: -4px;
-  border: 5px solid transparent;
-  border-top-color: var(--playhead);
-}
-
 #status,
 #export-status {
   color: var(--text-dim);
@@ -1525,67 +1223,6 @@ kbd {
   color: var(--text-dim);
   font-size: 12px;
   min-height: 1em;
-}
-
-/* --- Miniaturas de clip --- */
-
-.timeline-clip {
-  background-color: var(--clip);
-  background-size: cover;
-  background-position: center;
-}
-
-.timeline-clip::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.1) 65%, transparent);
-  pointer-events: none;
-}
-
-.timeline-clip .clip-name,
-.timeline-clip .clip-duration {
-  position: relative;
-  z-index: 1;
-}
-
-/* --- Handles de recorte en los bordes del clip --- */
-
-.trim-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 8px;
-  cursor: ew-resize;
-  z-index: 2;
-}
-
-.trim-handle-left {
-  left: 0;
-}
-
-.trim-handle-right {
-  right: 0;
-}
-
-.trim-handle:hover,
-.trim-handle.active {
-  background: rgba(255, 255, 255, 0.3);
-}
-
-/* --- Marcadores --- */
-
-.ruler-marker {
-  position: absolute;
-  top: 0;
-  width: 0;
-  height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 8px solid #e07a00;
-  cursor: pointer;
-  transform: translateX(-5px);
-  z-index: 3;
 }
 
 /* --- Bin de medios --- */
@@ -1838,15 +1475,6 @@ dialog#shortcuts-modal::backdrop {
   animation: status-flash 1.2s ease-out;
 }
 
-/* --- Jerarquía de la regla de tiempo: marcas menores más finas y sin
-   etiqueta entre las marcas mayores, para leer la duración de un
-   vistazo — pedido explícito del 2026-08-29. --- */
-
-.timeline-ruler .ruler-mark.minor {
-  border-left-color: rgba(154, 157, 168, 0.3);
-  color: transparent;
-}
-
 /* --- Distinguir pistas de vídeo/audio a simple vista además de por la
    forma de onda: una franja de color a juego con el tipo de icono
    (ojo=vídeo, altavoz=audio) en el borde del gutter. --- */
@@ -1855,13 +1483,13 @@ dialog#shortcuts-modal::backdrop {
   border-left: 3px solid transparent;
 }
 
-.timeline-track-row:has(.timeline-track-lane--video) .timeline-track-gutter {
+.timeline-track-gutter--video {
   /* --clip, no --accent: en el tema oscuro el acento es naranja y se
      confundiría con la franja naranja de las pistas de audio. */
   border-left-color: var(--clip);
 }
 
-.timeline-track-row:has(.timeline-track-lane--audio) .timeline-track-gutter {
+.timeline-track-gutter--audio {
   border-left-color: #e07a00;
 }
 
@@ -1969,4 +1597,57 @@ input[type="checkbox"]:checked {
 
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* --- Curvas RGB y LUT del inspector (2026-10-02) --- */
+
+.curve-channels {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.curve-channel {
+  flex: 1;
+  justify-content: center;
+  font-weight: 700;
+  padding: 0.25rem 0;
+}
+
+.curve-channel[data-channel="r"] {
+  color: #e5484d;
+}
+
+.curve-channel[data-channel="g"] {
+  color: #2f9e57;
+}
+
+.curve-channel[data-channel="b"] {
+  color: #3b74e0;
+}
+
+.curve-channel.is-active {
+  box-shadow: var(--nm-inset-sm);
+}
+
+.curve-editor {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  aspect-ratio: 1;
+  margin: 0 auto;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--nm-inset-sm);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Canal de los deslizadores de temperatura y tinte pintado con el eje
+   que mueven (azul→ámbar, verde→magenta), como en Lightroom/Resolve. */
+input[type="range"].range-temperature::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #4c8dff, #d8dde6 50%, #ffb347);
+}
+
+input[type="range"].range-tint::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #3fcf6a, #d8dde6 50%, #e05ad8);
 }

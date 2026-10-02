@@ -10,6 +10,14 @@ import {
   insertClip,
   moveClipTo,
   moveClipToTrack,
+  moveClipsBy,
+  pasteClipCopy,
+  duplicateClip,
+  removeClips,
+  slipClip,
+  addLut,
+  removeLut,
+  setClipLut,
   moveTrack,
   moveVolumeKeyframe,
   NEUTRAL_MASTER_AUDIO,
@@ -35,13 +43,16 @@ import {
   trimClipOut,
   trimClipOutRipple,
 } from "../core/timeline";
-import { parseProjectFile, serializeProject, type ProjectFile, type ProjectSource } from "../core/project";
+import { parseProjectFile, projectLutAssets, serializeProject, type ProjectFile, type ProjectSource } from "../core/project";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import type {
   ChromaKey,
   Clip,
   ColorFilterType,
+  ColorCurves,
   ColorGrade,
+  CurvePoint,
+  LutAsset,
   MasterAudio,
   Resolution,
   SourceFile,
@@ -51,15 +62,25 @@ import type {
   TransitionType,
 } from "../core/types";
 import { NEUTRAL_CHROMA_KEY, NEUTRAL_COLOR_GRADE } from "../core/types";
+import {
+  evaluateCurve,
+  IDENTITY_CURVE,
+  IDENTITY_CURVES,
+  isIdentityCurve,
+  isIdentityCurves,
+  normalizeColorGrade,
+  normalizeCurve,
+  parseCubeLut,
+} from "../core/color";
 import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
 import { getAppVideoBridge, readFileFromPath } from "./electronBridge";
 import { decodeAudioAsset } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
 import { getDecoderDescription } from "../media/description";
 import { createMasterAudioChain, type MasterAudioChain } from "../media/masterAudioChain";
-import { ColorGradeRenderer } from "../media/colorGradeGL";
+import { ColorGradeRenderer, type ResolvedLut } from "../media/colorGradeGL";
 import { createVideoPlayer, type VideoPlayer } from "../media/player";
-import { colorFilterCss, drawFrameFit } from "../media/render";
+import { drawFrameFit, lookForClip, type FrameLook } from "../media/render";
 import { decodeAllSamples, type DemuxedTrack } from "../media/samples";
 import { toSourceFile } from "../media/sourceFile";
 import { drawTextOverlays } from "../media/textOverlayRender";
@@ -71,6 +92,18 @@ import {
 import { generateThumbnail } from "../media/thumbnail";
 import { computeWaveformPeaks, drawWaveformSlice } from "../media/waveform";
 import { hydrateIcons, iconMarkup } from "./icons";
+import {
+  computeRows,
+  formatTimelineTime,
+  MIN_ROW_HEIGHT_PX,
+  RULER_HEIGHT_PX,
+  TimelineCanvasView,
+  type MarqueeRect,
+  type SourceVisual,
+  type TimelineHit,
+  type TimelineRow,
+  type TimelineViewState,
+} from "./timelineCanvas";
 
 // TS no conserva el estrechamiento de `x | null` dentro de `function`
 // declarados más abajo (solo dentro de arrow functions/const), así
@@ -99,10 +132,8 @@ const projectSourcesInput = requireElement<HTMLInputElement>("#project-sources-i
 const projectStatus = requireElement<HTMLParagraphElement>("#project-status");
 const timelineScroll = requireElement<HTMLDivElement>("#timeline-scroll");
 const timelineContent = requireElement<HTMLDivElement>("#timeline-content");
-const timelineRuler = requireElement<HTMLDivElement>("#timeline-ruler");
-const timelineTracksContainer = requireElement<HTMLDivElement>("#timeline-tracks");
-const timelineTextTrack = requireElement<HTMLDivElement>("#timeline-text-track");
-const timelinePlayhead = requireElement<HTMLDivElement>("#timeline-playhead");
+const timelineGutters = requireElement<HTMLDivElement>("#timeline-gutters");
+const timelineCanvas = requireElement<HTMLCanvasElement>("#timeline-canvas");
 const addVideoTrackButton = requireElement<HTMLButtonElement>("#add-video-track-button");
 const addAudioTrackButton = requireElement<HTMLButtonElement>("#add-audio-track-button");
 const selectClipButton = requireElement<HTMLButtonElement>("#select-clip-button");
@@ -185,6 +216,19 @@ const gradeGainBInput = requireElement<HTMLInputElement>("#grade-gain-b");
 const gradeSaturationInput = requireElement<HTMLInputElement>("#grade-saturation");
 const gradeContrastInput = requireElement<HTMLInputElement>("#grade-contrast");
 const gradeInvertInput = requireElement<HTMLInputElement>("#grade-invert");
+const gradeExposureInput = requireElement<HTMLInputElement>("#grade-exposure");
+const gradeTemperatureInput = requireElement<HTMLInputElement>("#grade-temperature");
+const gradeTintInput = requireElement<HTMLInputElement>("#grade-tint");
+const gradeShadowsInput = requireElement<HTMLInputElement>("#grade-shadows");
+const gradeHighlightsInput = requireElement<HTMLInputElement>("#grade-highlights");
+const curveEditorCanvas = requireElement<HTMLCanvasElement>("#curve-editor");
+const resetCurveChannelButton = requireElement<HTMLButtonElement>("#reset-curve-channel");
+const resetCurvesButton = requireElement<HTMLButtonElement>("#reset-curves");
+const clipLutSelect = requireElement<HTMLSelectElement>("#clip-lut-select");
+const clipLutIntensityInput = requireElement<HTMLInputElement>("#clip-lut-intensity");
+const importLutButton = requireElement<HTMLButtonElement>("#import-lut-button");
+const removeLutButton = requireElement<HTMLButtonElement>("#remove-lut-button");
+const lutFileInput = requireElement<HTMLInputElement>("#lut-file-input");
 const resetGradeButton = requireElement<HTMLButtonElement>("#reset-grade");
 const chromaEnabledInput = requireElement<HTMLInputElement>("#chroma-enabled");
 const chromaColorInput = requireElement<HTMLInputElement>("#chroma-color");
@@ -289,11 +333,8 @@ let selectedClip: ClipRef | undefined;
 /** Id del overlay de texto seleccionado (en la línea de tiempo o el preview) — mutuamente excluyente con selectedClip, ver selectTextOverlay/selectClipRef. */
 let selectedOverlayId: string | undefined;
 let activeSegment: ActiveSegment | undefined;
-/** Filtro de color del clip cuyo fotograma se está pintando ahora mismo (reproducción o scrub) — lo lee el onFrame de getPlayer más abajo. Separado de activeSegment porque el scrub también necesita pintar el filtro correcto sin considerarse "reproduciendo". */
-let activeColorFilter: ColorFilterType | undefined;
-/** Igual que activeColorFilter, pero para el grading real/croma (ver core/types.ts) — ampliación de alcance del 2026-08-29. */
-let activeColorGrade: ColorGrade | undefined;
-let activeChromaKey: ChromaKey | undefined;
+/** Aspecto (preset, grading, croma, LUT) del clip cuyo fotograma se está pintando ahora mismo (reproducción o scrub) — lo lee el onFrame de getPlayer más abajo. Separado de activeSegment porque el scrub también necesita pintar el aspecto correcto sin considerarse "reproduciendo". */
+let activeLook: FrameLook = {};
 let nextSourceNumber = 1;
 let nextClipNumber = 1;
 let nextTrackNumber = 1;
@@ -514,14 +555,12 @@ function findClipRef(ref: ClipRef | undefined): { track: Track; clip: Clip } | u
 
 function afterHistoryChange(): void {
   stopPlayback();
-  if (selectedClip && !findClipRef(selectedClip)) {
-    selectedClip = undefined;
-  }
+  pruneClipSelection();
   if (selectedOverlayId !== undefined && !findOverlayById(selectedOverlayId)) {
     clearOverlaySelection();
   }
   refreshTimelineLayout();
-  renderTextOverlayList(); // renderTextTrack() ya la cubre refreshTimelineLayout(), falta la lista lateral
+  renderTextOverlayList(); // la fila de textos del canvas ya la cubre refreshTimelineLayout(), falta la lista lateral
   syncTextEditorPanel();
   const found = findClipRef(selectedClip);
   if (found) {
@@ -616,7 +655,7 @@ function getPlayer(sourceId: string): VideoPlayer {
     entry.player = createVideoPlayer(entry.demuxed, {
       onFrame: (frame) => {
         if (!timeline) return;
-        drawFrameFit(ctx, frame, timeline.outputResolution, activeColorFilter, activeColorGrade, activeChromaKey, previewGradeRenderer);
+        drawFrameFit(ctx, frame, timeline.outputResolution, activeLook, previewGradeRenderer);
         if (textOverlays.length > 0) {
           const ticks = timelineTicksForSourceFrame(sourceId, frame.timestamp) ?? playheadTicks;
           drawActiveTextOverlays(ticks);
@@ -699,9 +738,7 @@ async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): P
     clipEndTicks(previous.clip) === clip.startTicks
   ) {
     activeSegment = { kind: "clip", trackId, clip };
-    activeColorFilter = clip.colorFilter;
-    activeColorGrade = clip.colorGrade;
-    activeChromaKey = clip.chromaKey;
+    activeLook = lookForClip(clip, timeline?.luts);
     player.play(Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000));
     pauseButton.disabled = false;
     return;
@@ -729,9 +766,7 @@ async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): P
   const startUs = Math.round(ticksToSeconds(clip.sourceInTicks + effectiveOffsetTicks) * 1_000_000);
   const endUs = Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000);
   activeSegment = { kind: "clip", trackId, clip };
-  activeColorFilter = clip.colorFilter;
-  activeColorGrade = clip.colorGrade;
-  activeChromaKey = clip.chromaKey;
+  activeLook = lookForClip(clip, timeline?.luts);
 
   await player.seekTo(startUs);
   // El usuario pudo saltar a otro sitio mientras se decodificaba el seek
@@ -878,9 +913,7 @@ async function seekToTimelineTicks(ticks: number): Promise<void> {
     return;
   }
 
-  activeColorFilter = position.clip.colorFilter;
-  activeColorGrade = position.clip.colorGrade;
-  activeChromaKey = position.clip.chromaKey;
+  activeLook = lookForClip(position.clip, timeline.luts);
   const player = getPlayer(position.sourceId);
   const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
   await player.seekTo(sourceTimeUs);
@@ -914,69 +947,50 @@ function splitAtPlayhead(): void {
   status.textContent = "Clip cortado en el playhead.";
 }
 
-// --- Timeline visual: zoom/scroll en píxeles, playhead, pistas, arrastrar para mover/recortar ---
+// --- Timeline visual (canvas): zoom/scroll, playhead, pistas, gestos de mover/recortar/slip/seleccionar ---
+//
+// Desde el 2026-10-02 la línea de tiempo se pinta entera en un <canvas>
+// (ver ui/timelineCanvas.ts) en vez de un <div> por clip. Aquí solo
+// queda la columna de gutters (DOM: nombre editable, ojo/mute, menú ⋮,
+// asas de altura) y los gestos, que preguntan al canvas "qué hay bajo el
+// puntero" (hitTest) y modifican la Timeline con /core como siempre.
 
 /**
  * Ancho del "gutter" (nombre/ojo-mute/quitar) fijo a la izquierda de
- * cada fila de pista — ver `.timeline-track-gutter` en styles.css,
- * debe coincidir con su `flex-basis`. Los segundos (regla), los
- * marcadores, el playhead y los propios clips se posicionan todos a
- * partir de este desplazamiento, para que la "zona de tiempo" empiece
- * justo después de donde están los canales, no se solape con ellos —
- * pedido explícitamente el 2026-08-21.
+ * cada fila de pista — ver `.timeline-gutters` en styles.css, debe
+ * coincidir con `--track-gutter-width`. El canvas empieza justo después,
+ * así que la "zona de tiempo" nunca se solapa con los canales — pedido
+ * explícitamente el 2026-08-21.
  */
 const TRACK_GUTTER_WIDTH_PX = 178;
 
+const timelineView = new TimelineCanvasView(timelineCanvas, () => requestTimelineDraw());
+let timelineRows: TimelineRow[] = [];
+let timelineRowsHeight = 0;
+/** Clip resaltado mientras se arrastra un efecto del panel por encima (ver handleEffectDrop). */
+let effectDropTargetClipId: string | undefined;
+/** Recuadro de selección en curso (beginMarqueeSelect), en coordenadas de contenido. */
+let marqueeRect: MarqueeRect | undefined;
+
 function setPlayheadTicks(ticks: number): void {
   playheadTicks = Math.max(0, Math.min(ticks, Math.max(timelineTotalTicks - 1, 0)));
-  updatePlayheadPosition();
+  requestTimelineDraw();
 }
 
-function updatePlayheadPosition(): void {
-  const left = TRACK_GUTTER_WIDTH_PX + ticksToSeconds(playheadTicks) * pixelsPerSecond;
-  timelinePlayhead.style.left = `${Math.round(left)}px`;
-}
-
-/** Ancho de la ZONA DE TIEMPO en píxeles (sin contar el gutter): la duración a escala, o el ancho visible menos el gutter si es menor (para que siempre rellene el hueco). */
+/** Ancho de la ZONA DE TIEMPO en píxeles (sin contar el gutter): la duración a escala, o el ancho visible menos el gutter si es menor (para que siempre rellene el hueco). Con un margen al final para poder soltar clips después del último. */
 function contentWidthPx(): number {
-  const naturalWidth = ticksToSeconds(timelineTotalTicks) * pixelsPerSecond;
+  const naturalWidth = ticksToSeconds(timelineTotalTicks) * pixelsPerSecond + 200;
   const viewportWidth = Math.max((timelineScroll.clientWidth || 1) - TRACK_GUTTER_WIDTH_PX, 1);
   return Math.max(naturalWidth, viewportWidth);
 }
 
-/** Recalcula duración total, ancho de la línea de tiempo, pistas, regla, marcadores y playhead. Llamar tras cualquier cambio estructural. */
-function refreshTimelineLayout(): void {
-  timelineTotalTicks = timeline ? timelineDurationTicks(timeline) : 0;
-  playheadTicks = Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0));
-
-  // El ancho total incluye el gutter — la regla y la pista de texto
-  // reservan ese mismo hueco con padding-left en CSS (ver
-  // .timeline-ruler/.timeline-text-track), así sus marcas quedan
-  // alineadas en X con los clips (que empiezan tras el gutter de cada fila).
-  const width = Math.round(contentWidthPx()) + TRACK_GUTTER_WIDTH_PX;
-  timelineContent.style.width = `${width}px`;
-  timelineRuler.style.width = `${width}px`;
-  timelineTextTrack.style.width = `${width}px`;
-
-  renderTimelineTracks();
-  renderTextTrack();
-  renderRuler();
-  renderMarkers();
-  updatePlayheadPosition();
-  renderInspector();
-}
-
 /**
  * Encola `fn` para el próximo fotograma, sin repetirla si ya hay una
- * pendiente. `refreshTimelineLayout`/`renderTimelineTracks`/`renderTextTrack`
- * reconstruyen bastante DOM (y, la de audio, redibujan todas las formas
- * de onda) — llamarlas directamente en cada pointermove de un arrastre
- * (que puede disparar muchas más veces por segundo de las que la
- * pantalla puede pintar) satura la cola de eventos del hilo principal
- * y da la sensación de que la app se queda pillada/va a tirones. Con
- * esto, como mucho se repinta una vez por fotograma real — la
- * mutación de datos (`timeline = ...`) sigue siendo siempre síncrona
- * e inmediata, solo se difiere el repintado caro.
+ * pendiente. Pintar la timeline o re-maquetar en cada pointermove de un
+ * arrastre (que puede disparar muchas más veces por segundo de las que
+ * la pantalla puede pintar) saturaría el hilo principal — con esto,
+ * como mucho se repinta una vez por fotograma real. La mutación de
+ * datos (`timeline = ...`) sigue siendo siempre síncrona e inmediata.
  */
 function throttleToFrame(fn: () => void): () => void {
   let scheduled = false;
@@ -990,35 +1004,102 @@ function throttleToFrame(fn: () => void): () => void {
   };
 }
 
-const scheduleTimelineLayoutRefresh = throttleToFrame(refreshTimelineLayout);
-const scheduleTextTrackRender = throttleToFrame(renderTextTrack);
-
-/**
- * Actualiza SOLO la posición/anchura en pantalla de los elementos ya
- * existentes de un clip (su bloque de vídeo y, si tiene, la celda de
- * audio pareja de su misma pista — ambos llevan `data-clip-id`, ver
- * renderVideoLaneClips/renderAudioLaneClips) en vez de reconstruir
- * toda la timeline. Usadas mientras un arrastre de MOVER/REDIMENSIONAR
- * TRANSICIÓN está en curso — esas operaciones nunca cambian el
- * contenido visual de un clip (miniatura, forma de onda), solo dónde
- * o cuánto ocupa, así que no hace falta la reconstrucción cara de
- * refreshTimelineLayout (todas las pistas, todas las formas de onda)
- * en cada fotograma — esa sí se sigue haciendo una vez al soltar (ver
- * selectClipRef en los `onUp` de los arrastres que las usan).
- */
-function syncClipLeftInDom(clipId: string, startTicks: number): void {
-  const leftPx = Math.round(ticksToSeconds(startTicks) * pixelsPerSecond);
-  for (const node of timelineTracksContainer.querySelectorAll<HTMLElement>(`[data-clip-id="${clipId}"]`)) {
-    node.style.left = `${leftPx}px`;
-  }
+function sourceVisual(sourceId: string): SourceVisual | undefined {
+  const entry = sources.get(sourceId);
+  if (!entry) return undefined;
+  const { width, height } = entry.sourceFile;
+  return {
+    name: entry.fileName,
+    thumbnail: entry.thumbnail,
+    waveformPeaks: entry.waveformPeaks,
+    durationTicks: entry.sourceFile.durationTicks,
+    aspect: width && height ? width / height : 16 / 9,
+  };
 }
 
-function syncClipWidthInDom(clipId: string, durationTicks: number): void {
-  const widthPx = Math.max(1, ticksToSeconds(durationTicks) * pixelsPerSecond);
-  for (const node of timelineTracksContainer.querySelectorAll<HTMLElement>(`[data-clip-id="${clipId}"]`)) {
-    node.style.width = `${widthPx}px`;
-  }
+function timelineViewState(): TimelineViewState | undefined {
+  if (!timeline) return undefined;
+  return {
+    timeline,
+    rows: timelineRows,
+    scrollX: timelineScroll.scrollLeft,
+    scrollY: timelineScroll.scrollTop,
+    pixelsPerSecond,
+    totalTicks: timelineTotalTicks,
+    playheadTicks,
+    markers: markers.map((marker) => marker.ticks),
+    textOverlays,
+    isSelected: isClipSelected,
+    selectedOverlayId,
+    dropTargetClipId: effectDropTargetClipId,
+    marquee: marqueeRect,
+    source: sourceVisual,
+  };
 }
+
+function drawTimelineNow(): void {
+  const state = timelineViewState();
+  if (!state) {
+    timelineView.setSize(timelineView.width, timelineView.height);
+    return;
+  }
+  timelineView.draw(state);
+}
+
+const requestTimelineDraw = throttleToFrame(drawTimelineNow);
+
+/** Ajusta tamaños (contenido desplazable, canvas, alturas de gutter) a las filas y al zoom actuales y repinta — sin reconstruir el DOM de los gutters. */
+function applyTimelineLayout(): void {
+  const layout = computeRows(timeline?.tracks ?? [], laneHeightPx);
+  timelineRows = timeline ? layout.rows : [];
+  timelineRowsHeight = timeline ? layout.totalHeight : 0;
+  for (const row of timelineRows) {
+    const gutterRow = timelineGutters.querySelector<HTMLElement>(`[data-row-key="${CSS.escape(row.key)}"]`);
+    if (gutterRow) gutterRow.style.height = `${row.height}px`;
+  }
+
+  // Sin altura fijada a mano (asa entre preview y timeline, ver
+  // attachMainVerticalResizeHandle), la timeline mide lo que miden sus
+  // filas — como antes con el DOM —, con un tope para no comerse el
+  // preview si hay muchas pistas (a partir de ahí, scroll vertical).
+  const wanted = RULER_HEIGHT_PX + timelineRowsHeight + 14;
+  if (!timelineSectionEl.style.height) {
+    const cap = Math.max(MIN_TIMELINE_SECTION_HEIGHT_PX, mainEl.clientHeight * 0.55);
+    timelineScroll.style.height = `${Math.round(Math.min(wanted, cap))}px`;
+  } else {
+    timelineScroll.style.height = "";
+  }
+
+  const width = Math.round(contentWidthPx()) + TRACK_GUTTER_WIDTH_PX;
+  timelineContent.style.width = `${width}px`;
+  timelineContent.style.height = `${RULER_HEIGHT_PX + timelineRowsHeight}px`;
+  resizeTimelineCanvas();
+  drawTimelineNow();
+}
+
+function resizeTimelineCanvas(): void {
+  timelineView.setSize(
+    Math.max(1, timelineScroll.clientWidth - TRACK_GUTTER_WIDTH_PX),
+    Math.max(1, timelineScroll.clientHeight),
+  );
+}
+
+/** Recalcula duración total, gutters, tamaños, marcadores e inspector y repinta. Llamar tras cualquier cambio estructural. */
+function refreshTimelineLayout(): void {
+  timelineTotalTicks = timeline ? timelineDurationTicks(timeline) : 0;
+  playheadTicks = Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0));
+  pruneClipSelection();
+  rebuildTimelineGutters();
+  applyTimelineLayout();
+  renderMarkers();
+  renderInspector();
+}
+
+new ResizeObserver(() => {
+  resizeTimelineCanvas();
+  drawTimelineNow();
+}).observe(timelineScroll);
+timelineScroll.addEventListener("scroll", () => requestTimelineDraw(), { passive: true });
 
 function zoomAt(newPixelsPerSecond: number, anchorClientX: number): void {
   if (!timeline) return;
@@ -1029,8 +1110,9 @@ function zoomAt(newPixelsPerSecond: number, anchorClientX: number): void {
   const anchorSeconds =
     (anchorClientX - scrollRectBefore.left + timelineScroll.scrollLeft - TRACK_GUTTER_WIDTH_PX) / pixelsPerSecond;
   pixelsPerSecond = Math.max(MIN_PIXELS_PER_SECOND, Math.min(MAX_PIXELS_PER_SECOND, newPixelsPerSecond));
-  refreshTimelineLayout();
+  applyTimelineLayout();
   timelineScroll.scrollLeft = anchorSeconds * pixelsPerSecond + TRACK_GUTTER_WIDTH_PX - (anchorClientX - scrollRectBefore.left);
+  drawTimelineNow();
 }
 
 function zoomToFit(): void {
@@ -1041,12 +1123,9 @@ function zoomToFit(): void {
   // refreshTimelineLayout, que aún no se ha llamado la primera vez).
   const totalTicks = timelineDurationTicks(timeline);
   if (totalTicks <= 0) return;
-  const viewport = Math.max((timelineScroll.clientWidth || 1) - TRACK_GUTTER_WIDTH_PX, 1);
+  const viewport = Math.max((timelineScroll.clientWidth || 1) - TRACK_GUTTER_WIDTH_PX - 24, 1);
   const seconds = Math.max(ticksToSeconds(totalTicks), 0.001);
-  pixelsPerSecond = Math.max(
-    MIN_PIXELS_PER_SECOND,
-    Math.min(MAX_PIXELS_PER_SECOND, viewport / seconds),
-  );
+  pixelsPerSecond = Math.max(MIN_PIXELS_PER_SECOND, Math.min(MAX_PIXELS_PER_SECOND, viewport / seconds));
   refreshTimelineLayout();
   timelineScroll.scrollLeft = 0;
 }
@@ -1064,7 +1143,7 @@ timelineScroll.addEventListener(
   "wheel",
   (event) => {
     if (!timeline) return;
-    if (!(event.ctrlKey || event.metaKey)) return; // sin Ctrl: scroll horizontal normal del navegador
+    if (!(event.ctrlKey || event.metaKey)) return; // sin Ctrl: scroll normal (Mayús+rueda = horizontal)
     event.preventDefault();
     const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
     zoomAt(pixelsPerSecond * factor, event.clientX);
@@ -1072,47 +1151,8 @@ timelineScroll.addEventListener(
   { passive: false },
 );
 
-const NICE_RULER_INTERVALS_SECONDS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200];
-
-function pickRulerInterval(): number {
-  const minPixelGap = 70;
-  for (const interval of NICE_RULER_INTERVALS_SECONDS) {
-    if (interval * pixelsPerSecond >= minPixelGap) return interval;
-  }
-  return NICE_RULER_INTERVALS_SECONDS[NICE_RULER_INTERVALS_SECONDS.length - 1]!;
-}
-
 function formatRulerTime(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const secs = seconds - minutes * 60;
-  if (minutes > 0) return `${minutes}:${String(Math.floor(secs)).padStart(2, "0")}`;
-  return Number.isInteger(secs) ? `${secs}s` : `${secs.toFixed(2)}s`;
-}
-
-function renderRuler(): void {
-  timelineRuler.innerHTML = "";
-  if (!timeline) return;
-  const interval = pickRulerInterval();
-  const totalSeconds = ticksToSeconds(timelineTotalTicks);
-  // Marcas menores (sin etiqueta, más tenues) a un quinto del intervalo
-  // mayor — dan jerarquía a la regla sin abarrotarla de números; ver
-  // .ruler-mark.minor en styles.css. Se dibujan primero para que las
-  // mayores queden por encima si coincidieran en el mismo punto.
-  const minorInterval = interval / 5;
-  for (let t = 0; t <= totalSeconds + 1e-6; t += minorInterval) {
-    if (Math.abs(t % interval) < 1e-6 || Math.abs((t % interval) - interval) < 1e-6) continue;
-    const minorMark = document.createElement("span");
-    minorMark.className = "ruler-mark minor";
-    minorMark.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + t * pixelsPerSecond)}px`;
-    timelineRuler.appendChild(minorMark);
-  }
-  for (let t = 0; t <= totalSeconds + 1e-6; t += interval) {
-    const mark = document.createElement("span");
-    mark.className = "ruler-mark";
-    mark.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + t * pixelsPerSecond)}px`;
-    mark.textContent = formatRulerTime(t);
-    timelineRuler.appendChild(mark);
-  }
+  return formatTimelineTime(seconds);
 }
 
 /** Ticks de inicio/fin de cada clip de cualquier pista, más el final de la timeline — puntos de corte "naturales" para el imán del playhead y del arrastre de clips. */
@@ -1146,11 +1186,35 @@ function snapTimelineTicks(ticks: number): number {
   return best;
 }
 
+/** Punto de pantalla → coordenadas del canvas de la timeline. */
+function timelineCanvasPoint(clientX: number, clientY: number): { x: number; y: number } {
+  const rect = timelineCanvas.getBoundingClientRect();
+  return { x: clientX - rect.left, y: clientY - rect.top };
+}
+
 function ticksAtClientX(clientX: number): number {
-  const rect = timelineContent.getBoundingClientRect();
-  const seconds = Math.max(0, (clientX - rect.left - TRACK_GUTTER_WIDTH_PX) / pixelsPerSecond);
-  const raw = Math.max(0, Math.min(secondsToTicks(seconds), Math.max(timelineTotalTicks - 1, 0)));
-  return snapTimelineTicks(raw);
+  const state = timelineViewState();
+  if (!state) return 0;
+  const raw = timelineView.ticksForX(state, timelineCanvasPoint(clientX, 0).x);
+  return snapTimelineTicks(Math.max(0, Math.min(raw, Math.max(timelineTotalTicks - 1, 0))));
+}
+
+function hitTestAtClient(clientX: number, clientY: number): TimelineHit {
+  const state = timelineViewState();
+  if (!state) return { area: "none" };
+  const { x, y } = timelineCanvasPoint(clientX, clientY);
+  return timelineView.hitTest(state, x, y);
+}
+
+/** Rectángulo en pantalla de un clip dentro de una fila concreta — lo que antes era `cell.getBoundingClientRect()` de su celda DOM. */
+function clipClientRect(rowKey: string, clip: Clip): DOMRect | undefined {
+  const state = timelineViewState();
+  const row = timelineRows.find((r) => r.key === rowKey);
+  if (!state || !row) return undefined;
+  const canvasRect = timelineCanvas.getBoundingClientRect();
+  const x0 = timelineView.xForTicks(state, clip.startTicks);
+  const x1 = timelineView.xForTicks(state, clipEndTicks(clip));
+  return new DOMRect(canvasRect.left + x0, canvasRect.top + timelineView.rowScreenTop(state, row), Math.max(1, x1 - x0), row.height);
 }
 
 function showFloatingTooltip(clientX: number, clientY: number, text: string): void {
@@ -1166,6 +1230,7 @@ function hideFloatingTooltip(): void {
 
 function beginTimelineScrub(event: PointerEvent): void {
   if (!timeline) return;
+  event.preventDefault();
   const initialTicks = ticksAtClientX(event.clientX);
   showFloatingTooltip(event.clientX, event.clientY, formatRulerTime(ticksToSeconds(initialTicks)));
   const onMove = (moveEvent: PointerEvent) => {
@@ -1183,100 +1248,145 @@ function beginTimelineScrub(event: PointerEvent): void {
   void seekToTimelineTicks(initialTicks);
 }
 
-timelineRuler.addEventListener("pointerdown", beginTimelineScrub);
-
 const CLIP_DRAG_CLICK_THRESHOLD_PX = 3;
 
+// --- Selección de clips (multiselección — ampliación pedida explícitamente el 2026-10-02) ---
+//
+// `selectedClip` sigue siendo EL clip "principal" (el que edita el
+// inspector, el que corta C, etc.); `selectedClips` es el conjunto
+// completo, que siempre lo incluye. Borrar, ripple delete, duplicar,
+// copiar y mover en grupo actúan sobre el conjunto.
+
+let selectedClips: ClipRef[] = [];
+
+function isClipSelected(trackId: string, clipId: string): boolean {
+  return selectedClips.some((ref) => ref.trackId === trackId && ref.clipId === clipId);
+}
+
+function clearClipSelection(): void {
+  selectedClip = undefined;
+  selectedClips = [];
+}
+
+/** Quita de la selección los clips que ya no existen (tras deshacer, borrar, mover de pista...). */
+function pruneClipSelection(): void {
+  selectedClips = selectedClips.filter((ref) => findClipRef(ref));
+  if (selectedClip && !findClipRef(selectedClip)) selectedClip = selectedClips[selectedClips.length - 1];
+  if (selectedClip && !isClipSelected(selectedClip.trackId, selectedClip.clipId)) selectedClips.push(selectedClip);
+}
+
+/** Ctrl/Mayús+clic: añade o quita un clip de la selección sin perder el resto. */
+function toggleClipInSelection(trackId: string, clipId: string): void {
+  if (isClipSelected(trackId, clipId)) {
+    selectedClips = selectedClips.filter((ref) => !(ref.trackId === trackId && ref.clipId === clipId));
+    const last = selectedClips[selectedClips.length - 1];
+    if (last) selectClipRef(last.trackId, last.clipId, true);
+    else {
+      clearClipSelection();
+      renderTimelineSelection();
+    }
+    return;
+  }
+  selectClipRef(trackId, clipId, true);
+}
+
+/** Todos los clips seleccionados, en orden de pista/posición (estable para copiar/pegar). */
+function selectedClipLocations(): { track: Track; clip: Clip }[] {
+  return selectedClips.map((ref) => findClipRef(ref)).filter((x): x is { track: Track; clip: Clip } => x !== undefined);
+}
+
 /**
- * Arrastra el cuerpo de un clip de vídeo para moverlo en el tiempo y,
- * si el cursor pasa a OTRA pista de vídeo, a esa pista (ampliación de
- * alcance pedida explícitamente el 2026-09-30 — antes un clip se quedaba
- * siempre en la pista en la que se creó). Mover dentro de la misma pista
- * es cambiar su `startTicks` (moveClipTo); a otra pista, moveClipToTrack,
- * que lo encaja en el hueco donde cae sin solapar a nadie — si no cabe
- * ahí, el clip se queda de momento en su pista original. Imán a los
- * bordes de los clips de la pista bajo el cursor (y al playhead).
+ * Arrastra el cuerpo de un clip para moverlo en el tiempo y, si el
+ * cursor pasa a OTRA pista del mismo tipo, a esa pista (vídeo↔vídeo
+ * desde el 2026-09-30; audio↔audio desde el 2026-10-02, cuando dejó de
+ * estar fuera de alcance mover los clips de las pistas de audio). Mover
+ * dentro de la misma pista es cambiar su `startTicks` (moveClipTo); a
+ * otra pista, moveClipToTrack, que lo encaja en el hueco donde cae sin
+ * solapar a nadie — si no cabe ahí, el clip se queda de momento en su
+ * pista original. Si el clip forma parte de una selección múltiple, se
+ * mueve TODO el grupo junto (moveClipsBy), sin cambiar de pista.
  * Recalcula SIEMPRE desde `dragStartTimeline` (nunca acumula sobre el
- * `timeline` de la iteración anterior), igual que beginTrimDrag — evita
- * que el redondeo de cada paso se acumule. Un solo paso de historial al
- * soltar; un gesto sin apenas movimiento se trata como un simple click
- * de selección, no como un arrastre.
+ * `timeline` de la iteración anterior) — evita que el redondeo de cada
+ * paso se acumule. Un solo paso de historial al soltar; un gesto sin
+ * apenas movimiento se trata como un simple clic de selección.
  */
 function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string): void {
   if (!timeline) return;
   event.preventDefault();
-  event.stopPropagation();
 
   const dragStartTimeline = timeline;
   const maybeDragStartTrack = dragStartTimeline.tracks.find((t) => t.id === trackId);
   const maybeOriginalClip = maybeDragStartTrack?.clips.find((c) => c.id === clipId);
   if (!maybeDragStartTrack || !maybeOriginalClip) return;
+  const trackKind = maybeDragStartTrack.kind;
   const originalClip = maybeOriginalClip;
   const startClientX = event.clientX;
   const startClientY = event.clientY;
   const snapThresholdTicks = Math.max(1, secondsToTicks(SNAP_PIXELS / pixelsPerSecond));
   const duration = clipDurationTicks(originalClip);
+  const groupRefs = isClipSelected(trackId, clipId) && selectedClips.length > 1 ? [...selectedClips] : undefined;
   let moved = false;
-  // Pista en la que está el clip AHORA MISMO en `timeline` (y en el DOM).
+  // Pista en la que está el clip AHORA MISMO en `timeline`.
   let currentTrackId = trackId;
 
-  /** Pista de vídeo bajo el cursor (su carril principal o el de su audio pegado), o undefined. */
-  function videoTrackIdAt(clientX: number, clientY: number): string | undefined {
-    const lane = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>(".timeline-track-lane[data-track-id]");
-    return lane?.dataset.trackId;
+  /** Pista del mismo tipo bajo el cursor (en vídeo, su fila principal o la de su audio pegado), o undefined. */
+  function sameKindTrackIdAt(clientX: number, clientY: number): string | undefined {
+    const hit = hitTestAtClient(clientX, clientY);
+    if (hit.area !== "row" || !hit.row.trackId) return undefined;
+    const track = dragStartTimeline.tracks.find((t) => t.id === hit.row.trackId);
+    return track?.kind === trackKind ? track.id : undefined;
+  }
+
+  function snapStart(newStart: number, snapTrack: Track | undefined, excludeIds: Set<string>): number {
+    if (!snappingEnabled || !snapTrack) return newStart;
+    const candidates = [
+      playheadTicks,
+      ...markers.map((m) => m.ticks),
+      ...snapTrack.clips.filter((c) => !excludeIds.has(c.id)).flatMap((c) => [c.startTicks, clipEndTicks(c)]),
+    ];
+    for (const candidate of candidates) {
+      if (Math.abs(newStart - candidate) <= snapThresholdTicks) return candidate;
+      const endAligned = candidate - duration;
+      if (endAligned >= 0 && Math.abs(newStart - endAligned) <= snapThresholdTicks) return endAligned;
+    }
+    return newStart;
   }
 
   function onMove(moveEvent: PointerEvent): void {
     const dxPx = moveEvent.clientX - startClientX;
     const dyPx = moveEvent.clientY - startClientY;
-    if (!moved && Math.abs(dxPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX && Math.abs(dyPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return; // podría ser solo un click
+    if (!moved && Math.abs(dxPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX && Math.abs(dyPx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return; // podría ser solo un clic
     moved = true;
     if (!timeline) return;
 
-    const hoveredTrackId = videoTrackIdAt(moveEvent.clientX, moveEvent.clientY) ?? currentTrackId;
-    const snapTrack = dragStartTimeline.tracks.find((t) => t.id === hoveredTrackId);
+    const rawStart = Math.max(0, originalClip.startTicks + secondsToTicks(dxPx / pixelsPerSecond));
 
-    let newStart = Math.max(0, originalClip.startTicks + secondsToTicks(dxPx / pixelsPerSecond));
-    if (snappingEnabled && snapTrack) {
-      const candidates = [
-        playheadTicks,
-        ...snapTrack.clips.filter((c) => c.id !== clipId).flatMap((c) => [c.startTicks, clipEndTicks(c)]),
-      ];
-      for (const candidate of candidates) {
-        if (Math.abs(newStart - candidate) <= snapThresholdTicks) {
-          newStart = candidate;
-          break;
-        }
-        const endAligned = candidate - duration;
-        if (endAligned >= 0 && Math.abs(newStart - endAligned) <= snapThresholdTicks) {
-          newStart = endAligned;
-          break;
-        }
+    if (groupRefs) {
+      const groupIds = new Set(groupRefs.map((r) => r.clipId));
+      const snapped = snapStart(rawStart, maybeDragStartTrack, groupIds);
+      timeline = moveClipsBy(dragStartTimeline, groupRefs, snapped - originalClip.startTicks);
+    } else {
+      const hoveredTrackId = sameKindTrackIdAt(moveEvent.clientX, moveEvent.clientY) ?? currentTrackId;
+      const snapTrack = dragStartTimeline.tracks.find((t) => t.id === hoveredTrackId);
+      const newStart = snapStart(rawStart, snapTrack, new Set([clipId]));
+      let nextTrackId = hoveredTrackId;
+      try {
+        timeline = moveClipToTrack(dragStartTimeline, trackId, clipId, hoveredTrackId, newStart);
+      } catch {
+        // No cabe en la pista bajo el cursor: se queda en su pista
+        // original, moviéndose solo en el tiempo.
+        timeline = moveClipTo(dragStartTimeline, trackId, clipId, newStart);
+        nextTrackId = trackId;
+      }
+      if (nextTrackId !== currentTrackId) {
+        currentTrackId = nextTrackId;
+        selectedClip = { trackId: nextTrackId, clipId };
+        selectedClips = [selectedClip];
       }
     }
 
-    let next: Timeline;
-    let nextTrackId = hoveredTrackId;
-    try {
-      next = moveClipToTrack(dragStartTimeline, trackId, clipId, hoveredTrackId, newStart);
-    } catch {
-      // No cabe en la pista bajo el cursor (o no es una pista válida):
-      // se queda en su pista original, moviéndose solo en el tiempo.
-      next = moveClipTo(dragStartTimeline, trackId, clipId, newStart);
-      nextTrackId = trackId;
-    }
-    timeline = next;
-
-    const updated = timeline.tracks.find((t) => t.id === nextTrackId)?.clips.find((c) => c.id === clipId);
-    if (nextTrackId !== currentTrackId) {
-      // Cambiar de carril sí exige reconstruir las filas (el bloque del
-      // clip y su celda de audio viven dentro del carril de su pista).
-      currentTrackId = nextTrackId;
-      selectedClip = { trackId: nextTrackId, clipId };
-      renderTimelineTracks();
-    } else if (updated) {
-      syncClipLeftInDom(clipId, updated.startTicks);
-    }
+    requestTimelineDraw();
+    const updated = timeline?.tracks.find((t) => t.id === currentTrackId)?.clips.find((c) => c.id === clipId);
     if (updated) {
       showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, formatRulerTime(ticksToSeconds(updated.startTicks)));
     }
@@ -1287,23 +1397,82 @@ function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string)
     window.removeEventListener("pointerup", onUp);
     hideFloatingTooltip();
     if (!moved || !timeline || timeline === dragStartTimeline) {
-      selectClipRef(trackId, clipId);
+      if (!moved) selectClipRef(trackId, clipId);
       return;
     }
     pushHistory(snapshotWithTimeline(dragStartTimeline));
-    // Durante el arrastre solo se movió el clip en el DOM
-    // (syncClipLeftInDom), sin recalcular la duración total de la
-    // timeline, la regla ni los anchos. Sin esto, `timelineTotalTicks`
-    // se queda con el valor de ANTES de mover: si el clip se movió más
-    // adelante, la reproducción cree que la timeline acaba antes de lo
-    // que acaba y `advanceFrom` da "Reproducción terminada" al llegar
-    // al clip — solo se oía el audio (ya programado) y el vídeo se
-    // quedaba parado.
+    // Recalcula la duración total (`timelineTotalTicks`): si el clip se
+    // movió más adelante y no se refrescara, la reproducción creería que
+    // la timeline acaba antes (ver "Bug corregido 2026-08-30" en CLAUDE.md).
     refreshTimelineLayout();
+    if (groupRefs) {
+      renderTimelineSelection();
+      status.textContent = `${groupRefs.length} clips movidos.`;
+      void seekToTimelineTicks(playheadTicks);
+      return;
+    }
     selectClipRef(currentTrackId, clipId);
     const updated = timeline.tracks.find((t) => t.id === currentTrackId)?.clips.find((c) => c.id === clipId);
-    if (updated) void seekToTimelineTicks(updated.startTicks);
+    if (updated && trackKind === "video") void seekToTimelineTicks(updated.startTicks);
     status.textContent = currentTrackId === trackId ? "Clip movido." : "Clip movido a otra pista.";
+  }
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/**
+ * Slip edit (Alt+arrastre sobre un clip de vídeo — ampliación pedida
+ * explícitamente el 2026-10-02): desliza el CONTENIDO del clip dentro de
+ * su ventana sin moverlo ni cambiar su duración (slipClip en
+ * core/timeline.ts). El preview enseña en vivo el fotograma que queda
+ * bajo el playhead (o el primero del clip si el playhead está fuera),
+ * para ver qué parte del archivo se está eligiendo.
+ */
+function beginSlipDrag(event: PointerEvent, trackId: string, clipId: string): void {
+  if (!timeline) return;
+  event.preventDefault();
+  const dragStartTimeline = timeline;
+  const originalClip = dragStartTimeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+  if (!originalClip || originalClip.kind !== "clip") return;
+  const sourceDurationTicks = sources.get(originalClip.sourceId)?.sourceFile.durationTicks ?? originalClip.sourceOutTicks;
+  const startClientX = event.clientX;
+  const previewTicks =
+    playheadTicks >= originalClip.startTicks && playheadTicks < clipEndTicks(originalClip) ? playheadTicks : originalClip.startTicks;
+  const schedulePreview = throttleToFrame(() => void seekToTimelineTicks(previewTicks));
+  selectClipRef(trackId, clipId);
+
+  function onMove(moveEvent: PointerEvent): void {
+    if (!timeline) return;
+    // Arrastrar a la DERECHA = el contenido se desplaza a la derecha
+    // (se ve material anterior del archivo), como en Resolve/Premiere.
+    const deltaTicks = -secondsToTicks((moveEvent.clientX - startClientX) / pixelsPerSecond);
+    timeline = slipClip(dragStartTimeline, trackId, clipId, deltaTicks, sourceDurationTicks);
+    const updated = timeline?.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    if (updated) {
+      showFloatingTooltip(
+        moveEvent.clientX,
+        moveEvent.clientY,
+        `Slip · entrada ${formatRulerTime(ticksToSeconds(updated.sourceInTicks))} · salida ${formatRulerTime(ticksToSeconds(updated.sourceOutTicks))}`,
+      );
+      trimInInput.value = String(ticksToSeconds(updated.sourceInTicks));
+      trimOutInput.value = String(ticksToSeconds(updated.sourceOutTicks));
+    }
+    requestTimelineDraw();
+    schedulePreview();
+  }
+
+  function onUp(): void {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    hideFloatingTooltip();
+    if (timeline && timeline !== dragStartTimeline) {
+      pushHistory(snapshotWithTimeline(dragStartTimeline));
+      clearTransitionFrameCache(); // los fotogramas de borde de una transición vecina cambian con el slip
+      refreshTimelineLayout();
+      void seekToTimelineTicks(previewTicks);
+      status.textContent = "Slip aplicado.";
+    }
   }
 
   window.addEventListener("pointermove", onMove);
@@ -1316,16 +1485,13 @@ function beginClipMoveDrag(event: PointerEvent, trackId: string, clipId: string)
  * propio que reposicionar — lo único que tiene sentido ajustar
  * arrastrándola es su duración, así que aquí arrastrar SIEMPRE cambia
  * sourceOutTicks (nunca mueve nada, para eso está el clip vecino). Sin
- * el límite de duración de un archivo real que tiene beginTrimDrag
- * (ahí el tope es la duración de la fuente; una transición no tiene
- * fuente) — se puede alargar todo lo que haga falta, export/preview ya
- * recortan solos el fundido a lo que de sí den los clips vecinos si
- * son más cortos (ver transitionAudioCues).
+ * el límite de duración de un archivo real que tiene beginTrimDrag —
+ * export/preview ya recortan solos el fundido a lo que den de sí los
+ * clips vecinos (ver transitionAudioCues).
  */
 function beginTransitionResizeDrag(event: PointerEvent, trackId: string, clipId: string): void {
   if (!timeline) return;
   event.preventDefault();
-  event.stopPropagation();
 
   const dragStartTimeline = timeline;
   const maybeDragStartTrack = dragStartTimeline.tracks.find((t) => t.id === trackId);
@@ -1338,19 +1504,14 @@ function beginTransitionResizeDrag(event: PointerEvent, trackId: string, clipId:
 
   function onMove(moveEvent: PointerEvent): void {
     const dx = moveEvent.clientX - startClientX;
-    if (!moved && Math.abs(dx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return; // podría ser solo un click de selección
+    if (!moved && Math.abs(dx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return; // podría ser solo un clic de selección
     moved = true;
     if (!timeline) return;
     const deltaTicks = secondsToTicks(dx / pixelsPerSecond);
     const appliedValue = Math.max(minDuration, originalClip.sourceOutTicks + deltaTicks);
     timeline = trimClipOut(dragStartTimeline, trackId, clipId, appliedValue, minDuration);
-    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-    if (updated) syncClipWidthInDom(clipId, clipDurationTicks(updated));
-    showFloatingTooltip(
-      moveEvent.clientX,
-      moveEvent.clientY,
-      `Duración: ${formatRulerTime(ticksToSeconds(appliedValue))}`,
-    );
+    requestTimelineDraw();
+    showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, `Duración: ${formatRulerTime(ticksToSeconds(appliedValue))}`);
   }
 
   function onUp(): void {
@@ -1382,7 +1543,6 @@ function beginTransitionResizeDrag(event: PointerEvent, trackId: string, clipId:
 function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, handle: "left" | "right"): void {
   if (!timeline) return;
   event.preventDefault();
-  event.stopPropagation();
 
   const dragStartTimeline = timeline;
   const maybeDragStartTrack = dragStartTimeline.tracks.find((t) => t.id === trackId);
@@ -1406,6 +1566,7 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
   // hueco), sin tocar el comportamiento por defecto (sin ripple, ver
   // CLAUDE.md 2026-08-21).
   const ripple = event.shiftKey;
+  selectClipRef(trackId, clipId);
 
   function snap(value: number, candidates: number[]): number {
     if (!snappingEnabled) return value;
@@ -1425,10 +1586,7 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
         appliedValue = Math.max(0, Math.min(snapped, originalClip.sourceOutTicks - minDuration));
         timeline = (ripple ? trimClipInRipple : trimClipIn)(dragStartTimeline, trackId, clipId, appliedValue, minDuration);
       } else {
-        const candidates = [
-          sourceDurationTicks,
-          ...(playheadSourceTicks !== undefined ? [playheadSourceTicks] : []),
-        ];
+        const candidates = [sourceDurationTicks, ...(playheadSourceTicks !== undefined ? [playheadSourceTicks] : [])];
         const snapped = snap(originalClip.sourceOutTicks + deltaTicks, candidates);
         appliedValue = Math.min(sourceDurationTicks, Math.max(snapped, originalClip.sourceInTicks + minDuration));
         timeline = (ripple ? trimClipOutRipple : trimClipOut)(dragStartTimeline, trackId, clipId, appliedValue, minDuration);
@@ -1436,7 +1594,7 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
     } catch {
       return; // el ripple dejaría algún clip en negativo — se ignora este tick, se queda en el último válido
     }
-    scheduleTimelineLayoutRefresh();
+    requestTimelineDraw();
     if (selectedClip && selectedClip.trackId === trackId && selectedClip.clipId === clipId) {
       const updated = timeline.tracks.find((t) => t.id === trackId)!.clips.find((c) => c.id === clipId)!;
       trimInInput.value = String(ticksToSeconds(updated.sourceInTicks));
@@ -1455,9 +1613,9 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
     hideFloatingTooltip();
     if (timeline && timeline !== dragStartTimeline) {
       pushHistory(snapshotWithTimeline(dragStartTimeline));
-      refreshTimelineLayout(); // recalcula duración total/regla/anchos tras recortar (el scheduleTimelineLayoutRefresh del arrastre puede quedar pendiente)
+      refreshTimelineLayout(); // recalcula duración total/regla/anchos tras recortar
       const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-      if (updated) void seekToTimelineTicks(updated.startTicks);
+      if (updated && maybeDragStartTrack!.kind === "video") void seekToTimelineTicks(updated.startTicks);
       status.textContent = ripple ? "Recorte aplicado (ripple)." : "Recorte aplicado.";
     }
   }
@@ -1465,6 +1623,175 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
 }
+
+/**
+ * Arrastra en una zona VACÍA de las pistas para seleccionar con un
+ * recuadro todos los clips que toque (multiselección, 2026-10-02). Con
+ * Ctrl/Mayús al empezar, se suma a la selección que ya hubiera. Un clic
+ * sin arrastre mueve el playhead ahí (lo que hacía siempre un clic en un
+ * hueco de la pista) y deselecciona.
+ */
+function beginMarqueeSelect(event: PointerEvent): void {
+  if (!timeline) return;
+  event.preventDefault();
+  const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+  const baseSelection = additive ? [...selectedClips] : [];
+  const startClientX = event.clientX;
+  const startClientY = event.clientY;
+  const contentPoint = (clientX: number, clientY: number) => {
+    const { x, y } = timelineCanvasPoint(clientX, clientY);
+    return { x: x + timelineScroll.scrollLeft, y: y - RULER_HEIGHT_PX + timelineScroll.scrollTop };
+  };
+  const origin = contentPoint(startClientX, startClientY);
+  let moved = false;
+
+  function onMove(moveEvent: PointerEvent): void {
+    if (!timeline) return;
+    if (!moved && Math.hypot(moveEvent.clientX - startClientX, moveEvent.clientY - startClientY) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return;
+    moved = true;
+    const current = contentPoint(moveEvent.clientX, moveEvent.clientY);
+    marqueeRect = { x0: origin.x, y0: origin.y, x1: current.x, y1: current.y };
+    const left = secondsToTicks(Math.max(0, Math.min(origin.x, current.x)) / pixelsPerSecond);
+    const right = secondsToTicks(Math.max(origin.x, current.x) / pixelsPerSecond);
+    const top = Math.min(origin.y, current.y);
+    const bottom = Math.max(origin.y, current.y);
+    const hits: ClipRef[] = [];
+    for (const row of timelineRows) {
+      if (!row.trackId || row.top + row.height < top || row.top > bottom) continue;
+      for (const clip of timelineView.clipsOfRow(timeline, row)) {
+        if (clip.startTicks < right && clipEndTicks(clip) > left && !hits.some((h) => h.clipId === clip.id && h.trackId === row.trackId)) {
+          hits.push({ trackId: row.trackId, clipId: clip.id });
+        }
+      }
+    }
+    const merged = [...baseSelection];
+    for (const ref of hits) {
+      if (!merged.some((m) => m.trackId === ref.trackId && m.clipId === ref.clipId)) merged.push(ref);
+    }
+    selectedClips = merged;
+    selectedClip = merged[merged.length - 1];
+    requestTimelineDraw();
+  }
+
+  function onUp(upEvent: PointerEvent): void {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    marqueeRect = undefined;
+    if (!moved) {
+      if (!additive) {
+        clearClipSelection();
+        clearOverlaySelection();
+      }
+      void seekToTimelineTicks(ticksAtClientX(upEvent.clientX));
+    } else if (selectedClip) {
+      const primary = selectedClip;
+      const all = selectedClips;
+      selectClipRef(primary.trackId, primary.clipId, true);
+      selectedClips = all;
+      status.textContent = all.length === 1 ? "1 clip seleccionado." : `${all.length} clips seleccionados.`;
+    } else {
+      clearClipSelection();
+    }
+    renderTimelineSelection();
+  }
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/** Reparte un pointerdown sobre el canvas de la timeline al gesto que toque según lo que haya bajo el puntero. */
+function handleTimelinePointerDown(event: PointerEvent): void {
+  if (!timeline || event.button !== 0) return;
+  const hit = hitTestAtClient(event.clientX, event.clientY);
+  if (hit.area === "ruler") {
+    beginTimelineScrub(event);
+    return;
+  }
+  if (hit.area !== "row") return;
+  const { row } = hit;
+
+  if (row.kind === "text") {
+    if (hit.overlay) {
+      if (hit.overlayPart === "body") {
+        selectTextOverlay(hit.overlay.id);
+        beginTextOverlayMove(event, hit.overlay);
+      } else {
+        beginTextOverlayTrim(event, hit.overlay, hit.overlayPart === "trimLeft" ? "left" : "right");
+      }
+      return;
+    }
+    beginMarqueeSelect(event);
+    return;
+  }
+
+  const trackId = row.trackId!;
+  const clip = hit.clip;
+  if (!clip) {
+    beginMarqueeSelect(event);
+    return;
+  }
+
+  if (clip.kind === "transition") {
+    beginTransitionResizeDrag(event, trackId, clip.id);
+    return;
+  }
+
+  const isAudioRow = row.kind !== "video";
+  const hasAudio = !!sources.get(clip.sourceId)?.waveformPeaks?.length;
+
+  if (hit.part === "keyframe" && hit.keyframeIndex !== undefined) {
+    if (event.altKey) {
+      event.preventDefault();
+      commitTimeline(removeVolumeKeyframe(timeline, trackId, clip.id, hit.keyframeIndex));
+      refreshTimelineLayout();
+      status.textContent = "Punto de volumen eliminado.";
+      return;
+    }
+    beginVolumeKeyframeDrag(event, trackId, clip.id, hit.keyframeIndex, row.key);
+    return;
+  }
+  if (isAudioRow && hasAudio && event.altKey) {
+    beginVolumeKeyframeCreateDrag(event, trackId, clip.id, row.key);
+    return;
+  }
+  if (hit.part === "trimLeft" || hit.part === "trimRight") {
+    beginTrimDrag(event, trackId, clip.id, hit.part === "trimLeft" ? "left" : "right");
+    return;
+  }
+  if (hit.part === "volumeLine") {
+    beginVolumeDrag(event, trackId, clip.id, row.key);
+    return;
+  }
+  if (event.ctrlKey || event.metaKey || event.shiftKey) {
+    event.preventDefault();
+    toggleClipInSelection(trackId, clip.id);
+    return;
+  }
+  if (event.altKey && !isAudioRow) {
+    beginSlipDrag(event, trackId, clip.id);
+    return;
+  }
+  beginClipMoveDrag(event, trackId, clip.id);
+}
+
+timelineCanvas.addEventListener("pointerdown", handleTimelinePointerDown);
+
+/** Cursor según lo que haya bajo el puntero (solo sin botones pulsados — durante un arrastre manda el gesto). */
+timelineCanvas.addEventListener("pointermove", (event) => {
+  if (event.buttons !== 0) return;
+  const hit = hitTestAtClient(event.clientX, event.clientY);
+  let cursor = "default";
+  if (hit.area === "ruler") cursor = "pointer";
+  else if (hit.area === "row") {
+    if (hit.overlay) cursor = hit.overlayPart === "body" ? "grab" : "ew-resize";
+    else if (hit.clip?.kind === "transition") cursor = "ew-resize";
+    else if (hit.part === "trimLeft" || hit.part === "trimRight") cursor = "ew-resize";
+    else if (hit.part === "volumeLine" || hit.part === "keyframe") cursor = "ns-resize";
+    else if (hit.clip) cursor = event.altKey && hit.row.kind === "video" ? "col-resize" : "grab";
+    else cursor = "crosshair";
+  }
+  timelineCanvas.style.cursor = cursor;
+});
 
 function clipLabel(clip: Clip, entry: SourceEntry | undefined): string {
   if (clip.kind === "transition") {
@@ -1476,17 +1803,16 @@ function clipLabel(clip: Clip, entry: SourceEntry | undefined): string {
 const EFFECT_DND_MIME = "application/x-app-video-effect";
 
 /**
- * Inserta una transición justo antes de `clip` (que debe ser
+ * Inserta una transición justo antes del final de `clip` (que debe ser
  * kind:"clip"), recortando su duración lo que haga falta para dejarle
  * sitio: se resta del FINAL de `clip` (trimClipOut) y la transición
  * ocupa exactamente ese tramo recién liberado — así nunca hace falta
- * desplazar ningún otro clip de la pista (ver CLAUDE.md, ampliación de
- * alcance del 2026-08-21: ya no hay ripple automático). Si el clip
- * vecino siguiente no llega exactamente hasta el final de la
- * transición, ese lado simplemente no funde con nada (mismo fallback
- * que si no hubiera vecino, ver neighborsOfTransition en
- * core/timeline.ts). Devuelve el id de la transición creada, o
- * undefined si no se pudo (con el status ya actualizado).
+ * desplazar ningún otro clip de la pista (sin ripple automático, ver
+ * CLAUDE.md). Si el clip vecino siguiente no llega exactamente hasta el
+ * final de la transición, ese lado simplemente no funde con nada (ver
+ * neighborsOfTransition en core/timeline.ts). Devuelve el id de la
+ * transición creada, o undefined si no se pudo (con el status ya
+ * actualizado).
  */
 function insertTransitionOnClip(
   trackId: string,
@@ -1528,8 +1854,13 @@ function handleEffectDrop(event: DragEvent, trackId: string, clipId: string): vo
   } catch {
     return;
   }
-  const clip = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-  if (!clip) return;
+  const track = timeline.tracks.find((t) => t.id === trackId);
+  const clip = track?.clips.find((c) => c.id === clipId);
+  if (!track || !clip) return;
+  if (track.kind !== "video") {
+    status.textContent = "Los efectos se sueltan sobre clips de una pista de vídeo.";
+    return;
+  }
 
   if (payload.kind === "transition") {
     if (clip.kind !== "clip") {
@@ -1574,119 +1905,67 @@ function handleEffectDrop(event: DragEvent, trackId: string, clipId: string): vo
   }
 }
 
-/** Fila de clips de una pista de VÍDEO: miniatura, filtro de color, recorte, arrastrar para mover, transiciones. */
-function renderVideoLaneClips(track: Track, lane: HTMLElement): void {
-  lane.innerHTML = "";
+// Soltar un efecto del panel de la izquierda sobre un clip lo aplica a
+// ESE clip — nunca con un botón de "aplicar", a petición explícita del
+// usuario. El canvas es un único destino de arrastre: se resuelve el
+// clip bajo el puntero en cada dragover.
+function effectDropClipAt(event: DragEvent): { trackId: string; clipId: string } | undefined {
+  const hit = hitTestAtClient(event.clientX, event.clientY);
+  if (hit.area !== "row" || hit.row.kind !== "video" || !hit.clip) return undefined;
+  return { trackId: hit.row.trackId!, clipId: hit.clip.id };
+}
 
-  for (const clip of track.clips) {
-    const entry = sources.get(clip.sourceId);
-    const durationTicks = clipDurationTicks(clip);
-    const isSelected = selectedClip?.trackId === track.id && selectedClip?.clipId === clip.id;
-
-    const block = document.createElement("div");
-    block.className =
-      "timeline-clip" +
-      (isSelected ? " selected" : "") +
-      (clip.kind === "transition" ? " timeline-clip--transition" : "") +
-      (clip.kind === "clip" && clip.videoHidden ? " timeline-clip--video-hidden" : "") +
-      (clip.kind === "clip" && clip.flagged ? " timeline-clip--flagged" : "");
-    block.dataset.clipId = clip.id;
-    block.style.left = `${Math.round(ticksToSeconds(clip.startTicks) * pixelsPerSecond)}px`;
-    block.style.width = `${Math.max(1, ticksToSeconds(durationTicks) * pixelsPerSecond)}px`;
-    if (entry?.thumbnail) block.style.backgroundImage = `url(${entry.thumbnail})`;
-    if (clip.kind === "clip") block.style.filter = colorFilterCss(clip.colorFilter);
-
-    // Ver handleEffectDrop: soltar aquí un efecto arrastrado desde el
-    // panel de la izquierda lo aplica a ESTE clip — nunca un botón de
-    // "aplicar", a petición explícita del usuario.
-    block.addEventListener("dragover", (event) => {
-      if (!event.dataTransfer?.types.includes(EFFECT_DND_MIME)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-      block.classList.add("drop-target");
-    });
-    block.addEventListener("dragleave", () => block.classList.remove("drop-target"));
-    block.addEventListener("drop", (event) => {
-      block.classList.remove("drop-target");
-      handleEffectDrop(event, track.id, clip.id);
-    });
-
-    const name = document.createElement("span");
-    name.className = "clip-name";
-    name.textContent = clipLabel(clip, entry);
-
-    const duration = document.createElement("span");
-    duration.className = "clip-duration";
-    duration.textContent = `${ticksToSeconds(durationTicks).toFixed(2)}s`;
-
-    block.append(name, duration);
-
-    if (clip.kind === "transition") {
-      // Una transición no tiene "contenido" que mover — arrastrar su
-      // cuerpo entero alarga/acorta su duración directamente, sin
-      // tener que acertarle a un borde de 8px. Ver beginTransitionResizeDrag.
-      block.title = "Arrastra para alargar o acortar la transición";
-      block.addEventListener("pointerdown", (event) => {
-        beginTransitionResizeDrag(event, track.id, clip.id);
-      });
-    } else {
-      const leftHandle = document.createElement("div");
-      leftHandle.className = "trim-handle trim-handle-left";
-      leftHandle.title = "Arrastra para recortar la entrada · Mayús+arrastra para ripple";
-      leftHandle.addEventListener("pointerdown", (event) => beginTrimDrag(event, track.id, clip.id, "left"));
-
-      const rightHandle = document.createElement("div");
-      rightHandle.className = "trim-handle trim-handle-right";
-      rightHandle.title = "Arrastra para recortar la salida · Mayús+arrastra para ripple";
-      rightHandle.addEventListener("pointerdown", (event) => beginTrimDrag(event, track.id, clip.id, "right"));
-
-      block.append(leftHandle, rightHandle);
-
-      block.addEventListener("pointerdown", (event) => {
-        const targetEl = event.target as HTMLElement;
-        if (targetEl.closest(".trim-handle")) return;
-        beginClipMoveDrag(event, track.id, clip.id);
-      });
-    }
-
-    lane.appendChild(block);
+timelineCanvas.addEventListener("dragover", (event) => {
+  if (!event.dataTransfer?.types.includes(EFFECT_DND_MIME)) return;
+  const target = effectDropClipAt(event);
+  if (target) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
   }
+  if (target?.clipId !== effectDropTargetClipId) {
+    effectDropTargetClipId = target?.clipId;
+    requestTimelineDraw();
+  }
+});
+timelineCanvas.addEventListener("dragleave", () => {
+  effectDropTargetClipId = undefined;
+  requestTimelineDraw();
+});
+timelineCanvas.addEventListener("drop", (event) => {
+  effectDropTargetClipId = undefined;
+  requestTimelineDraw();
+  const target = effectDropClipAt(event);
+  if (target) handleEffectDrop(event, target.trackId, target.clipId);
+});
+
+/** Geometría de la celda de audio de un clip, capturada al empezar un gesto de volumen (la celda no se mueve durante él). */
+function volumeCellRect(rowKey: string, trackId: string, clipId: string): DOMRect | undefined {
+  const clip = timeline?.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+  return clip ? clipClientRect(rowKey, clip) : undefined;
 }
 
 /**
- * Arrastra verticalmente dentro de la celda de audio de un clip para
- * cambiar su volumen (0-1) — sustituye al slider que antes vivía en el
- * panel lateral, a petición del usuario: el control vive en la propia
- * pista de audio de la línea de tiempo. Un solo paso de historial al
- * soltar, igual que beginTrimDrag.
+ * Arrastra verticalmente la línea de volumen de un clip (en su fila de
+ * audio) para cambiar su volumen plano (0-1). Un solo paso de historial
+ * al soltar, igual que beginTrimDrag. Desde el 2026-10-02 hay que
+ * agarrar la propia línea (antes, toda la celda): el resto del clip
+ * sirve para moverlo (ver beginClipMoveDrag).
  */
-function beginVolumeDrag(event: PointerEvent, trackId: string, clipId: string, cell: HTMLElement): void {
+function beginVolumeDrag(event: PointerEvent, trackId: string, clipId: string, rowKey: string): void {
   if (!timeline) return;
   event.preventDefault();
-  event.stopPropagation();
 
   const dragStartTimeline = timeline;
   const clip = dragStartTimeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-  if (!clip) return;
+  const cellRect = volumeCellRect(rowKey, trackId, clipId);
+  if (!clip || !cellRect) return;
   const wasMuted = clip.muted;
-  // La celda no se mueve verticalmente durante el arrastre (apply() ya
-  // no reconstruye nada, solo repinta su propia polilínea — ver
-  // repaintVolumeVisuals — así que sigue siendo el mismo nodo todo el
-  // gesto), así que un único rect capturado al empezar sigue siendo
-  // válido durante todo el gesto.
-  const cellRect = cell.getBoundingClientRect();
-
-  function volumeFromClientY(clientY: number): number {
-    const ratio = 1 - (clientY - cellRect.top) / cellRect.height;
-    return Math.max(0, Math.min(1, ratio));
-  }
 
   function apply(clientY: number, clientX: number): void {
     if (!timeline) return;
-    const volume = volumeFromClientY(clientY);
+    const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect!.top) / cellRect!.height));
     timeline = setClipAudio(timeline, trackId, clipId, volume, wasMuted);
-    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-    if (updated) repaintVolumeVisuals(cell, trackId, updated);
+    requestTimelineDraw();
     showFloatingTooltip(clientX, clientY, `Volumen: ${Math.round(volume * 100)}%`);
   }
 
@@ -1704,43 +1983,36 @@ function beginVolumeDrag(event: PointerEvent, trackId: string, clipId: string, c
       pushHistory(snapshotWithTimeline(dragStartTimeline));
       status.textContent = "Volumen del clip actualizado.";
     }
-    selectClipRef(trackId, clipId); // el propio gesto (clic o arrastre) selecciona el clip — ver renderAudioLaneClips
+    selectClipRef(trackId, clipId); // el propio gesto (clic o arrastre) selecciona el clip
   }
 
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
 }
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-
 /**
  * Alt+arrastra dentro de la celda de audio para añadir un punto de
  * volumen ahí mismo y ajustar su altura sin soltar — "subir y bajar el
- * audio por trozos" pedido explícitamente, en vez de un único volumen
- * plano para todo el clip. Recalcula SIEMPRE `addVolumeKeyframe` desde
- * `dragStartTimeline` (nunca acumula), igual que el resto de arrastres
- * de esta pantalla — cada punto intermedio del gesto es "el clip
- * original + un punto nuevo en la posición actual del ratón", así que
+ * audio por trozos" pedido explícitamente. Recalcula SIEMPRE
+ * `addVolumeKeyframe` desde `dragStartTimeline` (nunca acumula), así que
  * no hace falta localizar el punto recién creado para seguir moviéndolo.
  */
-function beginVolumeKeyframeCreateDrag(event: PointerEvent, trackId: string, clipId: string, cell: HTMLElement): void {
+function beginVolumeKeyframeCreateDrag(event: PointerEvent, trackId: string, clipId: string, rowKey: string): void {
   if (!timeline) return;
   event.preventDefault();
-  event.stopPropagation();
 
   const dragStartTimeline = timeline;
   const clip = dragStartTimeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-  if (!clip) return;
-  const cellRect = cell.getBoundingClientRect();
+  const cellRect = volumeCellRect(rowKey, trackId, clipId);
+  if (!clip || !cellRect) return;
   const clipDuration = clipDurationTicks(clip);
 
   function apply(clientX: number, clientY: number): void {
     if (!timeline) return;
-    const offsetTicks = Math.round(((clientX - cellRect.left) / cellRect.width) * clipDuration);
-    const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect.top) / cellRect.height));
+    const offsetTicks = Math.round(((clientX - cellRect!.left) / cellRect!.width) * clipDuration);
+    const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect!.top) / cellRect!.height));
     timeline = addVolumeKeyframe(dragStartTimeline, trackId, clipId, offsetTicks, volume);
-    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-    if (updated) repaintVolumeVisuals(cell, trackId, updated);
+    requestTimelineDraw();
     showFloatingTooltip(clientX, clientY, `${Math.round(volume * 100)}%`);
   }
 
@@ -1758,7 +2030,7 @@ function beginVolumeKeyframeCreateDrag(event: PointerEvent, trackId: string, cli
       pushHistory(snapshotWithTimeline(dragStartTimeline));
       status.textContent = "Punto de volumen añadido — arrástralo para ajustarlo, Alt+clic para quitarlo.";
     }
-    selectClipRef(trackId, clipId); // el propio gesto selecciona el clip — ver renderAudioLaneClips
+    selectClipRef(trackId, clipId);
   }
 
   window.addEventListener("pointermove", onMove);
@@ -1768,24 +2040,17 @@ function beginVolumeKeyframeCreateDrag(event: PointerEvent, trackId: string, cli
 /**
  * Arrastra un punto de volumen ya existente para reajustar su
  * instante/ganancia — mismo patrón "recalcula desde dragStartTimeline"
- * que el resto. Un simple click sin apenas movimiento no hace nada
+ * que el resto. Un simple clic sin apenas movimiento no hace nada
  * (evita un paso de "deshacer" fantasma que no cambió nada visible).
  */
-function beginVolumeKeyframeDrag(
-  event: PointerEvent,
-  trackId: string,
-  clipId: string,
-  keyframeIndex: number,
-  cell: HTMLElement,
-): void {
+function beginVolumeKeyframeDrag(event: PointerEvent, trackId: string, clipId: string, keyframeIndex: number, rowKey: string): void {
   if (!timeline) return;
   event.preventDefault();
-  event.stopPropagation();
 
   const dragStartTimeline = timeline;
   const clip = dragStartTimeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-  if (!clip) return;
-  const cellRect = cell.getBoundingClientRect();
+  const cellRect = volumeCellRect(rowKey, trackId, clipId);
+  if (!clip || !cellRect) return;
   const clipDuration = clipDurationTicks(clip);
   const startClientX = event.clientX;
   const startClientY = event.clientY;
@@ -1793,11 +2058,10 @@ function beginVolumeKeyframeDrag(
 
   function apply(clientX: number, clientY: number): void {
     if (!timeline) return;
-    const offsetTicks = Math.round(((clientX - cellRect.left) / cellRect.width) * clipDuration);
-    const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect.top) / cellRect.height));
+    const offsetTicks = Math.round(((clientX - cellRect!.left) / cellRect!.width) * clipDuration);
+    const volume = Math.max(0, Math.min(1, 1 - (clientY - cellRect!.top) / cellRect!.height));
     timeline = moveVolumeKeyframe(dragStartTimeline, trackId, clipId, keyframeIndex, offsetTicks, volume);
-    const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
-    if (updated) repaintVolumeVisuals(cell, trackId, updated);
+    requestTimelineDraw();
     showFloatingTooltip(clientX, clientY, `${Math.round(volume * 100)}%`);
   }
 
@@ -1825,168 +2089,6 @@ function beginVolumeKeyframeDrag(
   window.addEventListener("pointerup", onUp);
 }
 
-/**
- * Fila de forma de onda de una pista (el audio pegado a los clips de
- * una pista de vídeo, o los clips propios de una pista de audio — la
- * misma función sirve para ambas, ver renderTimelineTracks). Sin
- * puntos de volumen, la celda entera es arrastrable arriba/abajo para
- * el volumen plano de siempre (beginVolumeDrag). Alt+clic (y arrastre)
- * añade un punto de volumen en ese instante — a partir de ahí el
- * volumen se dibuja como una polilínea entre puntos, cada uno
- * arrastrable por separado (beginVolumeKeyframeDrag), y Alt+clic sobre
- * un punto lo quita.
- */
-
-/**
- * (Re)pinta SOLO la polilínea/puntos de volumen de la celda de audio
- * de un clip — la forma de onda (canvas) no depende del volumen, así
- * que no hace falta tocarla. Se usa tanto en el render inicial de la
- * celda (renderAudioLaneClips) como, síncrona y directamente (sin
- * pasar por refreshTimelineLayout), en cada punto de un arrastre de
- * volumen en curso (beginVolumeDrag/beginVolumeKeyframeCreateDrag/
- * beginVolumeKeyframeDrag) — mucho más barato que reconstruir toda la
- * timeline en cada fotograma solo para mover una polilínea. No
- * reengancha el propio `pointerdown` de `cell` (eso se hace una única
- * vez al crearla, leyendo el clip actual en cada evento — ver
- * renderAudioLaneClips).
- */
-function repaintVolumeVisuals(cell: HTMLElement, trackId: string, clip: Clip): void {
-  const clipDuration = clipDurationTicks(clip) || 1;
-  const keyframes = clip.volumeKeyframes ?? [];
-  const linePoints =
-    keyframes.length > 0
-      ? keyframes.map((k) => ({ x: (k.offsetTicks / clipDuration) * 100, y: (1 - k.volume) * 100 }))
-      : [
-          { x: 0, y: (1 - clip.volume) * 100 },
-          { x: 100, y: (1 - clip.volume) * 100 },
-        ];
-
-  cell.querySelector(".volume-svg")?.remove();
-  cell.querySelectorAll(".volume-point").forEach((el) => el.remove());
-  cell.querySelector(".volume-label")?.remove();
-
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("viewBox", "0 0 100 100");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.classList.add("volume-svg");
-  const polyline = document.createElementNS(SVG_NS, "polyline");
-  polyline.setAttribute("points", linePoints.map((p) => `${p.x},${p.y}`).join(" "));
-  svg.appendChild(polyline);
-  cell.appendChild(svg);
-
-  keyframes.forEach((keyframe, keyframeIndex) => {
-    const point = document.createElement("div");
-    point.className = "volume-point";
-    point.style.left = `${(keyframe.offsetTicks / clipDuration) * 100}%`;
-    point.style.top = `${(1 - keyframe.volume) * 100}%`;
-    point.title = `${Math.round(keyframe.volume * 100)}% — Alt+clic para quitar`;
-    point.addEventListener("pointerdown", (event) => {
-      if (event.altKey) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!timeline) return;
-        commitTimeline(removeVolumeKeyframe(timeline, trackId, clip.id, keyframeIndex));
-        refreshTimelineLayout();
-        status.textContent = "Punto de volumen eliminado.";
-        return;
-      }
-      beginVolumeKeyframeDrag(event, trackId, clip.id, keyframeIndex, cell);
-    });
-    cell.appendChild(point);
-  });
-
-  cell.classList.toggle("muted", clip.muted);
-  if (keyframes.length === 0) {
-    const volumeLabel = document.createElement("span");
-    volumeLabel.className = "volume-label";
-    volumeLabel.textContent = clip.muted ? "silenciado" : `${Math.round(clip.volume * 100)}%`;
-    cell.appendChild(volumeLabel);
-  }
-
-  cell.title =
-    keyframes.length > 0
-      ? "Arrastra un punto para moverlo · Alt+clic para añadir/quitar puntos"
-      : "Arrastra arriba/abajo para el volumen del clip · Alt+clic para subirlo/bajarlo por trozos";
-}
-
-function renderAudioLaneClips(track: Track, lane: HTMLElement): void {
-  lane.innerHTML = "";
-
-  for (const clip of track.clips) {
-    if (clip.kind !== "clip") continue; // una transición no tiene audio propio que editar aquí
-    const entry = sources.get(clip.sourceId);
-    const durationTicks = clipDurationTicks(clip);
-    const widthPx = Math.max(1, ticksToSeconds(durationTicks) * pixelsPerSecond);
-
-    const isSelected = selectedClip?.trackId === track.id && selectedClip?.clipId === clip.id;
-    const cell = document.createElement("div");
-    cell.className = "timeline-audio-cell" + (isSelected ? " selected" : "");
-    cell.dataset.clipId = clip.id;
-    cell.style.left = `${Math.round(ticksToSeconds(clip.startTicks) * pixelsPerSecond)}px`;
-    cell.style.width = `${widthPx}px`;
-
-    const hasAudio = !!entry?.waveformPeaks && entry.waveformPeaks.length > 0;
-
-    if (hasAudio) {
-      const cellCanvas = document.createElement("canvas");
-      cellCanvas.width = Math.round(widthPx);
-      cellCanvas.height = 32;
-      const cellCtx = cellCanvas.getContext("2d");
-      if (cellCtx) {
-        const sourceDurationTicks = entry!.sourceFile.durationTicks || 1;
-        const sliceStart = clip.sourceInTicks / sourceDurationTicks;
-        const sliceEnd = clip.sourceOutTicks / sourceDurationTicks;
-        drawWaveformSlice(
-          cellCtx,
-          entry!.waveformPeaks!,
-          sliceStart,
-          sliceEnd,
-          cellCanvas.width,
-          cellCanvas.height,
-          "#3f74d6",
-        );
-      }
-      cell.appendChild(cellCanvas);
-
-      cell.classList.add("has-volume");
-      repaintVolumeVisuals(cell, track.id, clip);
-    } else {
-      cell.classList.add("no-audio");
-      cell.title = "Este clip no tiene audio";
-    }
-
-    // Selecciona el clip (resalta la celda, habilita borrarlo con Supr —
-    // ver el handler de "Delete" — sin ninguna cruz suelta en la
-    // interfaz) al soltar tras un simple clic; si además hay arrastre de
-    // volumen en curso, ese arrastre selecciona al soltar (ver
-    // beginVolumeDrag/beginVolumeKeyframeCreateDrag) para no reconstruir
-    // la celda a mitad de gesto. Lee el clip ACTUAL de `timeline` en vez
-    // de cerrar sobre el `clip` de este render: este listener se queda
-    // pegado a la celda durante arrastres sucesivos (repaintVolumeVisuals
-    // no la reconstruye, solo repinta polilínea/puntos — ver su doc), así
-    // que "¿ya tiene puntos de volumen?" tiene que responderse en el
-    // momento del click, no con el estado de cuando se creó la celda.
-    cell.addEventListener("pointerdown", (event) => {
-      const targetEl = event.target as HTMLElement;
-      if (targetEl.closest(".volume-point")) return; // gestionado por el propio punto
-      const currentClip = timeline?.tracks.find((t) => t.id === track.id)?.clips.find((c) => c.id === clip.id);
-      if (!currentClip) return;
-      if (hasAudio && event.altKey) {
-        beginVolumeKeyframeCreateDrag(event, track.id, currentClip.id, cell);
-        return;
-      }
-      if (hasAudio && (currentClip.volumeKeyframes ?? []).length === 0) {
-        beginVolumeDrag(event, track.id, currentClip.id, cell);
-        return;
-      }
-      event.preventDefault();
-      selectClipRef(track.id, currentClip.id);
-    });
-
-    lane.appendChild(cell);
-  }
-}
-
 /** Nombre a mostrar en el gutter: el que haya puesto el usuario (Track.name), o si no "Vídeo N"/"Audio N" según su posición entre las de su mismo tipo. */
 function trackDisplayName(track: Track, allTracks: Track[]): string {
   if (track.name) return track.name;
@@ -1998,7 +2100,7 @@ function trackDisplayName(track: Track, allTracks: Track[]): string {
 /** Gutter (nombre editable, ojo/mute, subir/bajar capa, quitar) de la fila principal de una pista. */
 function buildTrackGutter(track: Track, allTracks: Track[]): HTMLElement {
   const gutter = document.createElement("div");
-  gutter.className = "timeline-track-gutter";
+  gutter.className = `timeline-track-gutter timeline-track-gutter--${track.kind}`;
 
   // Editable directamente (sin botón de "renombrar" aparte, a petición
   // explícita del usuario del 2026-08-21): un input siempre visible que
@@ -2029,9 +2131,7 @@ function buildTrackGutter(track: Track, allTracks: Track[]): HTMLElement {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "track-toggle" + (track.hidden ? " is-off" : "");
-  toggle.innerHTML = iconMarkup(
-    track.kind === "video" ? (track.hidden ? "eyeOff" : "eye") : track.hidden ? "volumeX" : "volume2",
-  );
+  toggle.innerHTML = iconMarkup(track.kind === "video" ? (track.hidden ? "eyeOff" : "eye") : track.hidden ? "volumeX" : "volume2");
   toggle.title =
     track.kind === "video"
       ? track.hidden
@@ -2056,15 +2156,11 @@ function buildTrackGutter(track: Track, allTracks: Track[]): HTMLElement {
 let closeOpenTrackMenu: (() => void) | undefined;
 
 /**
- * Botón "⋮" que agrupa subir/bajar de capa y eliminar pista — antes 3
- * botones sueltos siempre visibles en el gutter, consolidados en un
- * menú a petición explícita del 2026-08-29 (acciones poco frecuentes,
- * no necesitan un botón permanente cada una). El desplegable se añade
- * a `document.body` con posición `fixed` calculada desde el botón, en
- * vez de vivir dentro del gutter: `#timeline-scroll` tiene
- * `overflow-y: hidden` (para que el scroll sea solo horizontal, ver su
- * comentario), así que un desplegable posicionado dentro de esa fila
- * quedaría recortado en vez de flotar por encima — comprobado en vivo.
+ * Botón "⋮" que agrupa subir/bajar de capa y eliminar pista (acciones
+ * poco frecuentes, consolidadas en un menú a petición explícita del
+ * 2026-08-29). El desplegable se añade a `document.body` con posición
+ * `fixed` calculada desde el botón, para escapar del overflow del
+ * contenedor con scroll de la timeline.
  */
 function buildTrackMenu(track: Track): HTMLElement {
   const wrap = document.createElement("div");
@@ -2115,7 +2211,6 @@ function buildTrackMenu(track: Track): HTMLElement {
       if (!timeline) return;
       stopPlayback();
       commitTimeline(removeTrack(timeline, track.id));
-      if (selectedClip?.trackId === track.id) selectedClip = undefined;
       refreshTimelineLayout();
       void seekToTimelineTicks(playheadTicks);
     });
@@ -2123,8 +2218,7 @@ function buildTrackMenu(track: Track): HTMLElement {
     dropdown.append(up, down, remove);
 
     // La fila de la pista suele estar cerca del borde inferior de la
-    // ventana (la línea de tiempo vive abajo del todo) — si no cabe
-    // por debajo del botón, se abre hacia arriba en su lugar.
+    // ventana — si no cabe por debajo del botón, se abre hacia arriba.
     const buttonRect = menuButton.getBoundingClientRect();
     const estimatedHeight = 116;
     const opensUpward = buttonRect.bottom + estimatedHeight > window.innerHeight;
@@ -2134,7 +2228,7 @@ function buildTrackMenu(track: Track): HTMLElement {
     } else {
       dropdown.style.top = `${Math.round(buttonRect.bottom + 2)}px`;
     }
-    dropdown.style.right = `${Math.round(window.innerWidth - buttonRect.right)}px`;
+    dropdown.style.left = `${Math.round(buttonRect.left)}px`;
     document.body.appendChild(dropdown);
 
     const closeOnOutsideClick = (outsideEvent: MouseEvent) => {
@@ -2154,20 +2248,17 @@ function buildTrackMenu(track: Track): HTMLElement {
   return wrap;
 }
 
-/** Gutter de la fila secundaria (audio pegado) de una pista de vídeo — mismo ancho que el principal para que las columnas encajen, sin controles propios (el ojo/mute de arriba ya cubre esta franja). */
-function buildTrackSubGutter(): HTMLElement {
+/** Gutter de una fila sin controles propios: el audio pegado de un vídeo (el ojo/mute de arriba ya la cubre) o la fila de textos. */
+function buildLabelGutter(label: string, modifier: string): HTMLElement {
   const gutter = document.createElement("div");
-  gutter.className = "timeline-track-gutter timeline-track-gutter--sub";
-  const label = document.createElement("span");
-  label.className = "track-name";
-  label.textContent = "↳ audio";
-  gutter.appendChild(label);
+  gutter.className = `timeline-track-gutter timeline-track-gutter--${modifier}`;
+  const span = document.createElement("span");
+  span.className = "track-name";
+  span.textContent = label;
+  gutter.appendChild(span);
   return gutter;
 }
 
-const DEFAULT_VIDEO_LANE_HEIGHT_PX = 64;
-const DEFAULT_AUDIO_LANE_HEIGHT_PX = 36;
-const MIN_LANE_HEIGHT_PX = 20;
 const MIN_TIMELINE_SECTION_HEIGHT_PX = 160;
 const MIN_MAIN_TOP_HEIGHT_PX = 160;
 
@@ -2175,12 +2266,10 @@ const MIN_MAIN_TOP_HEIGHT_PX = 160;
  * Asa entre el preview/panel de arriba y toda la línea de tiempo de
  * abajo — sube o baja para darle más o menos espacio a la línea de
  * tiempo en conjunto (a diferencia de attachRowResizeHandle, que
- * cambia la altura de UNA fila) — pedido explícito del 2026-08-29.
- * Por defecto `.timeline-section` sigue sin altura propia (crece con
- * el contenido, como siempre); en cuanto se arrastra una vez pasa a
- * tener una altura fija en píxeles, y `#timeline-scroll` (overflow-y:
- * auto, ver styles.css) gana su propio scroll vertical si las pistas
- * ya no caben todas en ese hueco.
+ * cambia la altura de UNA fila) — pedido explícito del 2026-08-29. Sin
+ * arrastrarla nunca, la timeline mide lo que miden sus filas (con tope,
+ * ver applyTimelineLayout); en cuanto se arrastra pasa a tener una
+ * altura fija y el contenedor gana scroll vertical si no caben.
  */
 function attachMainVerticalResizeHandle(): void {
   mainVerticalResizeHandle.addEventListener("pointerdown", (event) => {
@@ -2197,6 +2286,7 @@ function attachMainVerticalResizeHandle(): void {
       );
       const next = Math.min(maxHeight, Math.max(MIN_TIMELINE_SECTION_HEIGHT_PX, Math.round(startHeight + delta)));
       timelineSectionEl.style.height = `${next}px`;
+      timelineScroll.style.height = "";
     }
     function onUp(): void {
       mainVerticalResizeHandle.classList.remove("dragging");
@@ -2224,13 +2314,12 @@ function laneHeightPx(rowKey: string, fallback: number): number {
 
 /**
  * Añade al pie del gutter de una fila un asa para cambiar su altura
- * libremente, cada fila por separado — "que cada una se pueda
- * modular en tamaño lo que se quiera", pedido explícitamente el
- * 2026-08-21 (sustituye al único tirador global de antes, que
- * afectaba a todas las pistas de vídeo por igual). Vive en el gutter,
- * no en el lane, para no interferir con arrastrar/seleccionar clips.
+ * libremente, cada fila por separado — "que cada una se pueda modular
+ * en tamaño lo que se quiera", pedido explícitamente el 2026-08-21.
+ * Mientras se arrastra solo se re-maqueta (applyTimelineLayout), sin
+ * reconstruir los gutters: el asa sigue viva durante todo el gesto.
  */
-function attachRowResizeHandle(gutter: HTMLElement, lane: HTMLElement, rowKey: string): void {
+function attachRowResizeHandle(gutter: HTMLElement, rowKey: string): void {
   const handle = document.createElement("div");
   handle.className = "row-resize-handle";
   handle.title = "Arrastra para cambiar la altura de esta pista";
@@ -2238,13 +2327,13 @@ function attachRowResizeHandle(gutter: HTMLElement, lane: HTMLElement, rowKey: s
     event.preventDefault();
     event.stopPropagation();
     const startY = event.clientY;
-    const startHeight = lane.getBoundingClientRect().height;
+    const startHeight = gutter.getBoundingClientRect().height;
     handle.classList.add("dragging");
+    const relayout = throttleToFrame(applyTimelineLayout);
 
     function onMove(moveEvent: PointerEvent): void {
-      const next = Math.max(MIN_LANE_HEIGHT_PX, Math.round(startHeight + (moveEvent.clientY - startY)));
-      rowHeights.set(rowKey, next);
-      lane.style.height = `${next}px`;
+      rowHeights.set(rowKey, Math.max(MIN_ROW_HEIGHT_PX, Math.round(startHeight + (moveEvent.clientY - startY))));
+      relayout();
     }
     function onUp(): void {
       handle.classList.remove("dragging");
@@ -2258,76 +2347,46 @@ function attachRowResizeHandle(gutter: HTMLElement, lane: HTMLElement, rowKey: s
 }
 
 /**
- * Dibuja todas las pistas: una fila por pista de vídeo (más su fila de
- * audio pegado justo debajo) y una fila por pista de audio, en orden
- * de composición de arriba abajo (índice más alto de `timeline.tracks`
- * = capa más arriba, ver core/types.ts) — así el orden visual coincide
- * con qué tapa a qué. Ampliación de alcance multipista pedida
- * explícitamente el 2026-08-21, ver CLAUDE.md.
+ * Reconstruye la columna de gutters (una fila por fila del canvas, mismo
+ * orden y altura — ver computeRows en ui/timelineCanvas.ts). Solo en
+ * cambios estructurales (refreshTimelineLayout), nunca por fotograma.
  */
-function renderTimelineTracks(): void {
-  timelineTracksContainer.innerHTML = "";
+function rebuildTimelineGutters(): void {
+  closeOpenTrackMenu?.();
+  timelineGutters.innerHTML = "";
+  const corner = document.createElement("div");
+  corner.className = "timeline-gutter-corner";
+  corner.style.height = `${RULER_HEIGHT_PX}px`;
+  timelineGutters.appendChild(corner);
   if (!timeline) return;
-
-  // Panel contextual: "Recorte del clip" solo ocupa sitio en el
-  // lateral mientras hay un clip seleccionado — pedido explícito del
-  // 2026-08-29 (antes se veía siempre, deshabilitado, sin selección).
-  trimDetails.hidden = selectedClip === undefined;
 
   if (timeline.tracks.length === 0) {
     const hint = document.createElement("div");
     hint.className = "timeline-tracks-empty-hint";
     hint.textContent = "Añade una pista para empezar.";
-    timelineTracksContainer.appendChild(hint);
-    return;
+    timelineGutters.appendChild(hint);
   }
 
-  const allTracks = timeline.tracks;
-  for (let i = allTracks.length - 1; i >= 0; i--) {
-    const track = allTracks[i]!;
-    const group = document.createElement("div");
-    group.className = "timeline-track-group";
-
-    const mainRow = document.createElement("div");
-    mainRow.className = "timeline-track-row";
-    const mainGutter = buildTrackGutter(track, allTracks);
-    const mainLane = document.createElement("div");
-    mainLane.className = "timeline-track-lane " + (track.kind === "video" ? "timeline-track-lane--video" : "timeline-track-lane--audio");
-    mainLane.style.height = `${laneHeightPx(track.id, track.kind === "video" ? DEFAULT_VIDEO_LANE_HEIGHT_PX : DEFAULT_AUDIO_LANE_HEIGHT_PX)}px`;
-    if (track.kind === "video") {
-      // Destino de "mover clip a otra pista" (ver beginClipMoveDrag).
-      mainLane.dataset.trackId = track.id;
-      renderVideoLaneClips(track, mainLane);
-      mainLane.addEventListener("pointerdown", (event) => {
-        if ((event.target as HTMLElement).closest(".timeline-clip")) return;
-        beginTimelineScrub(event);
-      });
-    } else {
-      renderAudioLaneClips(track, mainLane);
-    }
-    attachRowResizeHandle(mainGutter, mainLane, track.id);
-    mainRow.append(mainGutter, mainLane);
-    group.appendChild(mainRow);
-
-    if (track.kind === "video") {
-      const audioRowKey = `${track.id}:audio`;
-      const audioRow = document.createElement("div");
-      audioRow.className = "timeline-track-row timeline-track-row--sub";
-      const subGutter = buildTrackSubGutter();
-      const audioLane = document.createElement("div");
-      audioLane.className = "timeline-track-lane timeline-track-lane--audio";
-      audioLane.dataset.trackId = track.id; // soltar sobre el audio pegado cuenta como su pista de vídeo
-      audioLane.style.height = `${laneHeightPx(audioRowKey, DEFAULT_AUDIO_LANE_HEIGHT_PX)}px`;
-      renderAudioLaneClips(track, audioLane);
-      attachRowResizeHandle(subGutter, audioLane, audioRowKey);
-      audioRow.append(subGutter, audioLane);
-      group.appendChild(audioRow);
-    }
-
-    timelineTracksContainer.appendChild(group);
+  const { rows } = computeRows(timeline.tracks, laneHeightPx);
+  for (const row of rows) {
+    const track = row.trackId ? timeline.tracks.find((t) => t.id === row.trackId) : undefined;
+    let gutter: HTMLElement;
+    if (row.kind === "text") gutter = buildLabelGutter("Texto", "text");
+    else if (row.kind === "attachedAudio") gutter = buildLabelGutter("↳ audio", "sub");
+    else gutter = buildTrackGutter(track!, timeline.tracks);
+    gutter.dataset.rowKey = row.key;
+    gutter.style.height = `${row.height}px`;
+    if (row.endsGroup) gutter.classList.add("ends-group");
+    if (row.kind !== "text") attachRowResizeHandle(gutter, row.key);
+    timelineGutters.appendChild(gutter);
   }
+}
 
-  deleteClipButton.disabled = selectedClip === undefined;
+/** Refleja la selección actual en el canvas, el panel y los botones que dependen de ella (sin re-maquetar nada). */
+function renderTimelineSelection(): void {
+  deleteClipButton.disabled = selectedClips.length === 0;
+  renderInspector();
+  requestTimelineDraw();
 }
 
 addVideoTrackButton.addEventListener("click", () => {
@@ -2344,11 +2403,18 @@ addAudioTrackButton.addEventListener("click", () => {
   status.textContent = "Pista de audio añadida.";
 });
 
-function selectClipRef(trackId: string, clipId: string): void {
+/**
+ * Selecciona un clip como clip principal (el que edita el inspector).
+ * Con `additive`, lo añade a la selección múltiple en vez de sustituirla
+ * (Ctrl/Mayús+clic, recuadro — ver toggleClipInSelection).
+ */
+function selectClipRef(trackId: string, clipId: string, additive: boolean = false): void {
   const clip = timeline?.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
   if (!clip) return;
   clearOverlaySelection(); // selección mutuamente excluyente con los overlays de texto
   selectedClip = { trackId, clipId };
+  if (!additive) selectedClips = [selectedClip];
+  else if (!isClipSelected(trackId, clipId)) selectedClips = [...selectedClips, selectedClip];
   trimInInput.value = String(ticksToSeconds(clip.sourceInTicks));
   trimOutInput.value = String(ticksToSeconds(clip.sourceOutTicks));
   clipMutedInput.checked = clip.muted;
@@ -2356,8 +2422,7 @@ function selectClipRef(trackId: string, clipId: string): void {
   clipColorFilterSelect.value = clip.colorFilter ?? "";
   syncGradePanel(clip);
   trimDetails.open = true; // al seleccionar un clip, se abre solo el compartimento donde se edita
-  renderInspector();
-  renderTimelineTracks();
+  renderTimelineSelection();
 }
 
 /**
@@ -2393,6 +2458,17 @@ function syncGradePanel(clip: Clip): void {
   gradeSaturationInput.value = String(grade.saturation);
   gradeContrastInput.value = String(grade.contrast);
   gradeInvertInput.checked = grade.invert;
+  gradeExposureInput.value = String(grade.exposure);
+  gradeTemperatureInput.value = String(grade.temperature);
+  gradeTintInput.value = String(grade.tint);
+  gradeShadowsInput.value = String(grade.shadows);
+  gradeHighlightsInput.value = String(grade.highlights);
+  panelCurves = grade.curves ?? IDENTITY_CURVES;
+  drawCurveEditor();
+
+  renderLutOptions();
+  clipLutSelect.value = clip.lut?.lutId ?? "";
+  clipLutIntensityInput.value = String(clip.lut?.intensity ?? 1);
 
   const key = clip.chromaKey ?? NEUTRAL_CHROMA_KEY;
   chromaEnabledInput.checked = key.enabled;
@@ -2404,6 +2480,11 @@ function syncGradePanel(clip: Clip): void {
 
 /** Cada slider de grading/croma tiene un <output id="<id>-val"> al lado que muestra su valor — se refresca al sincronizar el panel y en cada `input`. */
 const GRADE_SLIDER_IDS = [
+  "grade-exposure",
+  "grade-temperature",
+  "grade-tint",
+  "grade-shadows",
+  "grade-highlights",
   "grade-lift-r",
   "grade-lift-g",
   "grade-lift-b",
@@ -2417,6 +2498,7 @@ const GRADE_SLIDER_IDS = [
   "grade-contrast",
   "chroma-similarity",
   "chroma-smoothness",
+  "clip-lut-intensity",
 ];
 
 function refreshGradeOutputs(): void {
@@ -2442,7 +2524,19 @@ function readGradeFromForm(): ColorGrade {
     saturation: numberOr(gradeSaturationInput.value, 1),
     contrast: numberOr(gradeContrastInput.value, 1),
     invert: gradeInvertInput.checked,
+    exposure: numberOr(gradeExposureInput.value, 0),
+    temperature: numberOr(gradeTemperatureInput.value, 0),
+    tint: numberOr(gradeTintInput.value, 0),
+    shadows: numberOr(gradeShadowsInput.value, 0),
+    highlights: numberOr(gradeHighlightsInput.value, 0),
+    ...(isIdentityCurves(panelCurves) ? {} : { curves: panelCurves }),
   };
+}
+
+/** LUT elegida en el panel (sin tocar la timeline), ya resuelta contra el registro — para la previsualización en vivo. */
+function readLutFromForm(): ResolvedLut | undefined {
+  const asset = timeline?.luts?.find((l) => l.id === clipLutSelect.value);
+  return asset ? { asset, intensity: Math.max(0, Math.min(1, numberOr(clipLutIntensityInput.value, 1))) } : undefined;
 }
 
 /** Lee el croma de los campos del panel (sin tocar la timeline). */
@@ -2468,13 +2562,17 @@ function readChromaFromForm(): ChromaKey {
  */
 const previewGradeLive = throttleToFrame(() => {
   if (!timeline || !selectedClip || activeSegment) return;
-  activeColorGrade = readGradeFromForm();
-  activeChromaKey = readChromaFromForm();
+  activeLook = { ...activeLook, colorGrade: readGradeFromForm(), chromaKey: readChromaFromForm(), lut: readLutFromForm() };
   void seekToTimelineTicks(playheadTicks);
 });
 
 const GRADE_INPUT_IDS = GRADE_SLIDER_IDS.filter((id) => id.startsWith("grade-")).concat(["grade-invert"]);
 const CHROMA_INPUT_IDS = GRADE_SLIDER_IDS.filter((id) => id.startsWith("chroma-")).concat(["chroma-enabled", "chroma-color"]);
+
+document.getElementById("clip-lut-intensity")?.addEventListener("input", () => {
+  refreshGradeOutputs();
+  previewGradeLive();
+});
 
 for (const id of GRADE_INPUT_IDS.concat(CHROMA_INPUT_IDS)) {
   const el = document.getElementById(id);
@@ -2543,6 +2641,262 @@ function commitChromaFromForm(): void {
 
 resetGradeButton.addEventListener("click", resetGradeSettings);
 
+// --- Curvas RGB (ampliación pedida explícitamente el 2026-10-02) ---
+//
+// Las curvas son parte del ColorGrade (`grade.curves`), así que siguen el
+// mismo ciclo que las barras: mientras se arrastra un punto se
+// previsualiza (previewGradeLive) y al soltar se guarda en el clip
+// (commitGradeFromForm) — un arrastre = un paso de historial.
+
+type CurveChannel = keyof ColorCurves;
+let panelCurves: ColorCurves = IDENTITY_CURVES;
+let activeCurveChannel: CurveChannel = "master";
+const CURVE_COLORS: Record<CurveChannel, string> = { master: "#d8dde6", r: "#ff5a5a", g: "#3fcf6a", b: "#4c8dff" };
+const CURVE_POINT_HIT_PX = 9;
+
+function curveCanvasMetrics(): { size: number; pad: number } {
+  return { size: curveEditorCanvas.width, pad: 8 };
+}
+
+function drawCurveEditor(): void {
+  const c = curveEditorCanvas.getContext("2d");
+  if (!c) return;
+  const { size, pad } = curveCanvasMetrics();
+  const inner = size - pad * 2;
+  c.clearRect(0, 0, size, size);
+  c.fillStyle = "#14171d";
+  c.fillRect(0, 0, size, size);
+  c.strokeStyle = "rgba(255,255,255,0.08)";
+  c.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = pad + (inner * i) / 4 + 0.5;
+    c.beginPath();
+    c.moveTo(pad, v);
+    c.lineTo(size - pad, v);
+    c.moveTo(v, pad);
+    c.lineTo(v, size - pad);
+    c.stroke();
+  }
+  c.beginPath();
+  c.moveTo(pad, size - pad);
+  c.lineTo(size - pad, pad);
+  c.strokeStyle = "rgba(255,255,255,0.12)";
+  c.stroke();
+
+  const order: CurveChannel[] = ["master", "r", "g", "b"];
+  for (const channel of [...order.filter((ch) => ch !== activeCurveChannel), activeCurveChannel]) {
+    const points = normalizeCurve(panelCurves[channel]);
+    const active = channel === activeCurveChannel;
+    if (!active && isIdentityCurve(points)) continue;
+    c.strokeStyle = CURVE_COLORS[channel];
+    c.globalAlpha = active ? 1 : 0.35;
+    c.lineWidth = active ? 2 : 1.25;
+    c.beginPath();
+    for (let i = 0; i <= inner; i++) {
+      const x = i / inner;
+      const y = evaluateCurve(points, x);
+      const px = pad + i;
+      const py = pad + (1 - y) * inner;
+      if (i === 0) c.moveTo(px, py);
+      else c.lineTo(px, py);
+    }
+    c.stroke();
+    if (active) {
+      for (const point of points) {
+        c.beginPath();
+        c.arc(pad + point.x * inner, pad + (1 - point.y) * inner, 4.5, 0, Math.PI * 2);
+        c.fillStyle = "#14171d";
+        c.fill();
+        c.stroke();
+      }
+    }
+  }
+  c.globalAlpha = 1;
+}
+
+function curvePointFromEvent(event: PointerEvent | MouseEvent): { x: number; y: number } {
+  const rect = curveEditorCanvas.getBoundingClientRect();
+  const { size, pad } = curveCanvasMetrics();
+  const scale = size / rect.width;
+  const inner = size - pad * 2;
+  return {
+    x: Math.max(0, Math.min(1, ((event.clientX - rect.left) * scale - pad) / inner)),
+    y: Math.max(0, Math.min(1, 1 - ((event.clientY - rect.top) * scale - pad) / inner)),
+  };
+}
+
+function nearestCurvePointIndex(points: CurvePoint[], at: { x: number; y: number }): number {
+  const rect = curveEditorCanvas.getBoundingClientRect();
+  const { size, pad } = curveCanvasMetrics();
+  const pxPerUnit = ((size - pad * 2) * rect.width) / size;
+  let best = -1;
+  let bestDistance = CURVE_POINT_HIT_PX;
+  points.forEach((point, index) => {
+    const d = Math.hypot((point.x - at.x) * pxPerUnit, (point.y - at.y) * pxPerUnit);
+    if (d <= bestDistance) {
+      best = index;
+      bestDistance = d;
+    }
+  });
+  return best;
+}
+
+function setPanelCurve(channel: CurveChannel, points: CurvePoint[]): void {
+  panelCurves = { ...panelCurves, [channel]: normalizeCurve(points) };
+  drawCurveEditor();
+}
+
+curveEditorCanvas.addEventListener("pointerdown", (event) => {
+  if (!findClipRef(selectedClip) || event.button !== 0) return;
+  event.preventDefault();
+  const at = curvePointFromEvent(event);
+  let points = normalizeCurve(panelCurves[activeCurveChannel]);
+  let index = nearestCurvePointIndex(points, at);
+  if (index === -1) {
+    points = normalizeCurve([...points, at]);
+    index = points.findIndex((p) => p.x === at.x);
+    setPanelCurve(activeCurveChannel, points);
+    previewGradeLive();
+  }
+  const draggedIndex = index;
+  const isEndpoint = draggedIndex === 0 || draggedIndex === points.length - 1;
+  curveEditorCanvas.setPointerCapture(event.pointerId);
+
+  function onMove(moveEvent: PointerEvent): void {
+    const target = curvePointFromEvent(moveEvent);
+    const current = [...points];
+    const prev = current[draggedIndex - 1];
+    const next = current[draggedIndex + 1];
+    // Los extremos solo suben/bajan; los intermedios no pueden cruzar a sus vecinos.
+    const x = isEndpoint ? current[draggedIndex]!.x : Math.max((prev?.x ?? 0) + 0.01, Math.min((next?.x ?? 1) - 0.01, target.x));
+    current[draggedIndex] = { x, y: target.y };
+    points = current;
+    panelCurves = { ...panelCurves, [activeCurveChannel]: current };
+    drawCurveEditor();
+    previewGradeLive();
+  }
+  function onUp(): void {
+    curveEditorCanvas.removeEventListener("pointermove", onMove);
+    curveEditorCanvas.removeEventListener("pointerup", onUp);
+    curveEditorCanvas.removeEventListener("pointercancel", onUp);
+    setPanelCurve(activeCurveChannel, points);
+    commitGradeFromForm();
+  }
+  curveEditorCanvas.addEventListener("pointermove", onMove);
+  curveEditorCanvas.addEventListener("pointerup", onUp);
+  curveEditorCanvas.addEventListener("pointercancel", onUp);
+});
+
+curveEditorCanvas.addEventListener("dblclick", (event) => {
+  if (!findClipRef(selectedClip)) return;
+  const points = normalizeCurve(panelCurves[activeCurveChannel]);
+  const index = nearestCurvePointIndex(points, curvePointFromEvent(event));
+  if (index <= 0 || index >= points.length - 1) return; // los extremos no se quitan
+  setPanelCurve(activeCurveChannel, points.filter((_, i) => i !== index));
+  commitGradeFromForm();
+});
+
+for (const button of document.querySelectorAll<HTMLButtonElement>(".curve-channel")) {
+  button.addEventListener("click", () => {
+    activeCurveChannel = (button.dataset.channel as CurveChannel | undefined) ?? "master";
+    for (const other of document.querySelectorAll<HTMLButtonElement>(".curve-channel")) {
+      other.classList.toggle("is-active", other === button);
+    }
+    drawCurveEditor();
+  });
+}
+
+resetCurveChannelButton.addEventListener("click", () => {
+  setPanelCurve(activeCurveChannel, IDENTITY_CURVE);
+  commitGradeFromForm();
+});
+resetCurvesButton.addEventListener("click", () => {
+  panelCurves = IDENTITY_CURVES;
+  drawCurveEditor();
+  commitGradeFromForm();
+});
+drawCurveEditor();
+
+// --- LUT 3D .cube (ampliación pedida explícitamente el 2026-10-02) ---
+//
+// Las LUT viven en el registro del proyecto (`timeline.luts`, se guardan
+// dentro del archivo de proyecto) y cada clip apunta a una por id con su
+// intensidad (`clip.lut`) — ver LutAsset/ClipLut en core/types.ts.
+
+function renderLutOptions(): void {
+  const current = clipLutSelect.value;
+  clipLutSelect.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "Ninguna";
+  clipLutSelect.appendChild(none);
+  for (const lut of timeline?.luts ?? []) {
+    const option = document.createElement("option");
+    option.value = lut.id;
+    option.textContent = `${lut.name} (${lut.size}³)`;
+    clipLutSelect.appendChild(option);
+  }
+  clipLutSelect.value = (timeline?.luts ?? []).some((l) => l.id === current) ? current : "";
+  removeLutButton.disabled = (timeline?.luts ?? []).length === 0;
+}
+
+/** Guarda en el clip seleccionado la LUT/intensidad del panel. No hace nada si no cambió. */
+function commitLutFromForm(): void {
+  const found = findClipRef(selectedClip);
+  if (!timeline || !found || found.clip.kind !== "clip") return;
+  const lutId = clipLutSelect.value;
+  const next = lutId ? { lutId, intensity: Math.max(0, Math.min(1, numberOr(clipLutIntensityInput.value, 1))) } : undefined;
+  if (JSON.stringify(next) === JSON.stringify(found.clip.lut)) return;
+  commitTimeline(setClipLut(timeline, found.track.id, found.clip.id, next));
+  void seekToTimelineTicks(playheadTicks);
+}
+
+clipLutSelect.addEventListener("change", () => {
+  commitLutFromForm();
+  status.textContent = clipLutSelect.value ? "LUT aplicada al clip." : "LUT quitada del clip.";
+});
+clipLutIntensityInput.addEventListener("change", commitLutFromForm);
+importLutButton.addEventListener("click", () => lutFileInput.click());
+
+lutFileInput.addEventListener("change", async () => {
+  const file = lutFileInput.files?.[0];
+  lutFileInput.value = "";
+  if (!file || !timeline) return;
+  let lut: LutAsset;
+  try {
+    lut = parseCubeLut(await file.text(), `lut-${Date.now().toString(36)}`, file.name.replace(/\.cube$/i, ""));
+  } catch (error) {
+    status.textContent = `No se pudo importar la LUT: ${error instanceof Error ? error.message : String(error)}`;
+    return;
+  }
+  // Importar con un clip seleccionado = importar Y aplicarla, en un solo paso de historial.
+  let next = addLut(timeline, lut);
+  const found = findClipRef(selectedClip);
+  if (found && found.clip.kind === "clip") next = setClipLut(next, found.track.id, found.clip.id, { lutId: lut.id, intensity: 1 });
+  commitTimeline(next);
+  renderLutOptions();
+  if (found) {
+    clipLutSelect.value = lut.id;
+    clipLutIntensityInput.value = "1";
+    refreshGradeOutputs();
+  }
+  void seekToTimelineTicks(playheadTicks);
+  status.textContent = `LUT «${lut.name}» importada${found ? " y aplicada al clip" : ""}.`;
+});
+
+removeLutButton.addEventListener("click", () => {
+  if (!timeline) return;
+  const lutId = clipLutSelect.value || timeline.luts?.[0]?.id;
+  const lut = timeline.luts?.find((l) => l.id === lutId);
+  if (!lut) return;
+  commitTimeline(removeLut(timeline, lut.id));
+  renderLutOptions();
+  const found = findClipRef(selectedClip);
+  if (found) syncGradePanel(found.clip);
+  void seekToTimelineTicks(playheadTicks);
+  status.textContent = `LUT «${lut.name}» quitada del proyecto (y de los clips que la usaban).`;
+});
+
 // --- Filtros de color propios del usuario (pedido explícito del 2026-10-01) ---
 //
 // Un "filtro propio" es un look con nombre: el grading del panel + el
@@ -2559,28 +2913,33 @@ interface CustomColorFilter {
 }
 
 const CUSTOM_FILTERS_STORAGE_KEY = "appVideo.customFilters";
-const GRADE_NUMBER_KEYS = Object.keys(NEUTRAL_COLOR_GRADE).filter((k) => k !== "invert") as (keyof ColorGrade)[];
 
-function isCustomColorFilter(value: unknown): value is CustomColorFilter {
-  if (typeof value !== "object" || value === null) return false;
+/** Valida un filtro guardado y normaliza su grading (los guardados antes del 2026-10-02 no traen exposición/temperatura/curvas: se rellenan en neutro, ver normalizeColorGrade). */
+function toCustomColorFilter(value: unknown): CustomColorFilter | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
-  const grade = v.colorGrade as Record<string, unknown> | undefined;
   const validPresets = Array.from(clipColorFilterSelect.options, (o) => o.value).filter(Boolean);
-  return (
-    typeof v.id === "string" &&
-    typeof v.name === "string" &&
-    (v.colorFilter === undefined || (typeof v.colorFilter === "string" && validPresets.includes(v.colorFilter))) &&
-    typeof grade === "object" &&
-    grade !== null &&
-    typeof grade.invert === "boolean" &&
-    GRADE_NUMBER_KEYS.every((k) => typeof grade[k] === "number" && Number.isFinite(grade[k]))
-  );
+  const colorGrade = normalizeColorGrade(v.colorGrade);
+  if (
+    typeof v.id !== "string" ||
+    typeof v.name !== "string" ||
+    !colorGrade ||
+    !(v.colorFilter === undefined || (typeof v.colorFilter === "string" && validPresets.includes(v.colorFilter)))
+  ) {
+    return undefined;
+  }
+  return {
+    id: v.id,
+    name: v.name,
+    colorGrade,
+    ...(v.colorFilter ? { colorFilter: v.colorFilter as ColorFilterType } : {}),
+  };
 }
 
 function loadCustomFilters(): CustomColorFilter[] {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(CUSTOM_FILTERS_STORAGE_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter(isCustomColorFilter) : [];
+    return Array.isArray(parsed) ? parsed.map(toCustomColorFilter).filter((f): f is CustomColorFilter => f !== undefined) : [];
   } catch {
     return [];
   }
@@ -2660,14 +3019,119 @@ customFilterNameInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") saveCustomFilterFromPanel();
 });
 
+/**
+ * Borra todos los clips seleccionados (Supr) — con `ripple` (Mayús+Supr,
+ * ampliación pedida explícitamente el 2026-10-02) además cierra los
+ * huecos que dejan en sus pistas (rippleDeleteClip en core/timeline.ts).
+ */
+function deleteSelectedClips(ripple: boolean): void {
+  if (!timeline || selectedClips.length === 0) return;
+  stopPlayback();
+  const count = selectedClips.length;
+  commitTimeline(removeClips(timeline, selectedClips, ripple));
+  clearClipSelection();
+  refreshTimelineLayout();
+  void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
+  const what = count === 1 ? "Clip eliminado" : `${count} clips eliminados`;
+  status.textContent = ripple ? `${what} cerrando el hueco (ripple).` : `${what}.`;
+}
+
+/** Portapapeles de clips (Ctrl+C/X) — vive solo en esta sesión, no en el sistema. `offsetTicks` = distancia al clip más temprano copiado, para pegar el grupo conservando su disposición. */
+let clipClipboard: { trackId: string; trackKind: TrackKind; clip: Clip; offsetTicks: number }[] = [];
+
+function copySelectedClips(): boolean {
+  const located = selectedClipLocations().filter(({ clip }) => clip.kind === "clip");
+  if (located.length === 0) {
+    status.textContent = "Selecciona uno o más clips (no transiciones) para copiarlos.";
+    return false;
+  }
+  const minStart = Math.min(...located.map(({ clip }) => clip.startTicks));
+  clipClipboard = located.map(({ track, clip }) => ({
+    trackId: track.id,
+    trackKind: track.kind,
+    clip,
+    offsetTicks: clip.startTicks - minStart,
+  }));
+  status.textContent = located.length === 1 ? "Clip copiado." : `${located.length} clips copiados.`;
+  return true;
+}
+
+/**
+ * Pega lo copiado en el playhead: cada clip vuelve a su misma pista (o,
+ * si ya no existe, a la primera de su tipo), a playhead + su distancia
+ * original dentro del grupo, en el primer hueco libre donde quepa entero
+ * (pasteClipCopy — nunca pisa ni empuja otros clips).
+ */
+function pasteClipboard(): void {
+  if (!timeline || clipClipboard.length === 0) return;
+  stopPlayback();
+  let next = timeline;
+  const pasted: ClipRef[] = [];
+  try {
+    for (const item of clipClipboard) {
+      const trackId =
+        next.tracks.find((t) => t.id === item.trackId)?.id ?? next.tracks.find((t) => t.kind === item.trackKind)?.id;
+      if (!trackId) continue;
+      const newId = `clip-${nextClipNumber++}`;
+      next = pasteClipCopy(next, trackId, item.clip, newId, playheadTicks + item.offsetTicks);
+      pasted.push({ trackId, clipId: newId });
+    }
+  } catch (error) {
+    status.textContent = `No se pudo pegar: ${error instanceof Error ? error.message : String(error)}`;
+    return;
+  }
+  if (pasted.length === 0) return;
+  commitTimeline(next);
+  refreshTimelineLayout();
+  selectClipRef(pasted[0]!.trackId, pasted[0]!.clipId);
+  selectedClips = pasted;
+  renderTimelineSelection();
+  status.textContent = pasted.length === 1 ? "Clip pegado." : `${pasted.length} clips pegados.`;
+}
+
+/** Ctrl+D: duplica cada clip seleccionado detrás de sí mismo (duplicateClip). */
+function duplicateSelectedClips(): void {
+  if (!timeline) return;
+  const located = selectedClipLocations().filter(({ clip }) => clip.kind === "clip");
+  if (located.length === 0) {
+    status.textContent = "Selecciona uno o más clips para duplicarlos.";
+    return;
+  }
+  stopPlayback();
+  let next = timeline;
+  const copies: ClipRef[] = [];
+  for (const { track, clip } of located) {
+    const newId = `clip-${nextClipNumber++}`;
+    next = duplicateClip(next, track.id, clip.id, newId);
+    copies.push({ trackId: track.id, clipId: newId });
+  }
+  commitTimeline(next);
+  refreshTimelineLayout();
+  selectClipRef(copies[0]!.trackId, copies[0]!.clipId);
+  selectedClips = copies;
+  renderTimelineSelection();
+  status.textContent = copies.length === 1 ? "Clip duplicado." : `${copies.length} clips duplicados.`;
+}
+
+/** Ctrl+A: selecciona todos los clips (no transiciones) de todas las pistas. */
+function selectAllClips(): void {
+  if (!timeline) return;
+  const all: ClipRef[] = timeline.tracks.flatMap((track) =>
+    track.clips.filter((c) => c.kind === "clip").map((c) => ({ trackId: track.id, clipId: c.id })),
+  );
+  if (all.length === 0) return;
+  const last = all[all.length - 1]!;
+  selectClipRef(last.trackId, last.clipId);
+  selectedClips = all;
+  renderTimelineSelection();
+  status.textContent = `${all.length} clips seleccionados.`;
+}
+
 function removeClipRef(trackId: string, clipId: string): void {
   if (!timeline) return;
   stopPlayback();
   commitTimeline(removeClip(timeline, trackId, clipId));
-  if (selectedClip && selectedClip.trackId === trackId && selectedClip.clipId === clipId) {
-    selectedClip = undefined;
-  }
-  refreshTimelineLayout();
+  refreshTimelineLayout(); // pruneClipSelection quita el clip borrado de la selección
   void seekToTimelineTicks(playheadTicks);
 }
 
@@ -2895,6 +3359,9 @@ async function addClipFromFile(file: File): Promise<void> {
     if (!hasAutoFitted) {
       hasAutoFitted = true;
       zoomToFit();
+      // Al cargar el primer vídeo cambia la maqueta (desaparece la zona de
+      // "suelta tu vídeo", aparece el inspector): se reajusta cuando ya está.
+      requestAnimationFrame(zoomToFit);
     } else {
       refreshTimelineLayout();
     }
@@ -2957,9 +3424,49 @@ function renderMediaBin(): void {
     addButton.title = "Añadir otro clip de este archivo al final de la pista de vídeo superior";
     addButton.addEventListener("click", () => addClipFromSource(sourceId));
 
-    li.append(thumb, info, addButton);
+    const addAudioButton = document.createElement("button");
+    addAudioButton.type = "button";
+    addAudioButton.className = "media-bin-add";
+    addAudioButton.innerHTML = iconMarkup("volume2");
+    addAudioButton.title = "Añadir solo el audio de este archivo al final de una pista de audio";
+    addAudioButton.disabled = !entry.audio;
+    addAudioButton.addEventListener("click", () => addAudioClipFromSource(sourceId));
+
+    li.append(thumb, info, addAudioButton, addButton);
     mediaBinList.appendChild(li);
   }
+}
+
+/**
+ * Añade el audio de una fuente ya cargada como clip propio al final de la
+ * primera pista de AUDIO (creándola si no hay ninguna) — la vía para
+ * llenar pistas de audio independientes, cuyos clips se pueden mover
+ * desde el 2026-10-02 (dentro de su pista y entre pistas de audio).
+ */
+function addAudioClipFromSource(sourceId: string): void {
+  if (!timeline) return;
+  const entry = sources.get(sourceId);
+  if (!entry?.audio) return;
+  const clip: Clip = {
+    id: `clip-${nextClipNumber++}`,
+    kind: "clip",
+    sourceId,
+    startTicks: 0,
+    sourceInTicks: 0,
+    sourceOutTicks: entry.sourceFile.durationTicks,
+    volume: 1,
+    muted: false,
+  };
+  let base = timeline;
+  let trackId = base.tracks.find((t) => t.kind === "audio")?.id;
+  if (!trackId) {
+    trackId = `audio-${nextTrackNumber++}`;
+    base = addTrack(base, trackId, "audio");
+  }
+  commitTimeline(appendClip(base, trackId, clip));
+  refreshTimelineLayout();
+  selectClipRef(trackId, clip.id);
+  status.textContent = `Audio de ${entry.fileName} añadido a una pista de audio.`;
 }
 
 function addClipFromSource(sourceId: string): void {
@@ -3113,9 +3620,7 @@ function applyOutputSettings(): void {
 applyOutputButton.addEventListener("click", applyOutputSettings);
 
 splitButton.addEventListener("click", splitAtPlayhead);
-deleteClipButton.addEventListener("click", () => {
-  if (selectedClip) removeClipRef(selectedClip.trackId, selectedClip.clipId);
-});
+deleteClipButton.addEventListener("click", () => deleteSelectedClips(false));
 
 insertTransitionButton.addEventListener("click", () => {
   const found = findClipRef(selectedClip);
@@ -3387,20 +3892,9 @@ function removeMarker(id: string): void {
   renderMarkers();
 }
 
+/** Lista lateral de marcadores (los triángulos de la regla los pinta el canvas, ver drawRuler en ui/timelineCanvas.ts). */
 function renderMarkers(): void {
-  timelineRuler.querySelectorAll(".ruler-marker").forEach((el) => el.remove());
-  for (const marker of markers) {
-    const flag = document.createElement("div");
-    flag.className = "ruler-marker";
-    flag.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + ticksToSeconds(marker.ticks) * pixelsPerSecond)}px`;
-    flag.title = formatRulerTime(ticksToSeconds(marker.ticks));
-    flag.addEventListener("click", (event) => {
-      event.stopPropagation();
-      void seekToTimelineTicks(marker.ticks);
-    });
-    timelineRuler.appendChild(flag);
-  }
-
+  requestTimelineDraw();
   markerList.innerHTML = "";
   for (const marker of markers) {
     const li = document.createElement("li");
@@ -3437,15 +3931,15 @@ function findOverlayById(id: string): TextOverlay | undefined {
 function clearOverlaySelection(): void {
   selectedOverlayId = undefined;
   renderInspector();
+  requestTimelineDraw();
 }
 
 /** Selecciona un overlay de texto (por id) para editarlo — mutuamente excluyente con la selección de clip. */
 function selectTextOverlay(id: string): void {
   if (!findOverlayById(id)) return;
-  selectedClip = undefined;
+  clearClipSelection();
   selectedOverlayId = id;
-  renderTimelineTracks(); // por si había un clip resaltado, quitarle el resalte
-  renderTextTrack();
+  requestTimelineDraw(); // quita el resalte del clip que hubiera y resalta el texto
   syncTextEditorPanel(); // llama a renderInspector()
   textDetails.open = true; // al seleccionar un texto, se abre solo el compartimento donde se edita
   void seekToTimelineTicks(playheadTicks);
@@ -3489,7 +3983,7 @@ function removeTextOverlay(id: string): void {
 /** Refresca a la vez la lista del panel lateral y el bloque en la línea de tiempo — llamar tras cualquier cambio a `textOverlays`. */
 function renderTextOverlaysUI(): void {
   renderTextOverlayList();
-  renderTextTrack();
+  requestTimelineDraw();
 }
 
 function renderTextOverlayList(): void {
@@ -3611,7 +4105,7 @@ function beginTextOverlayMove(event: PointerEvent, overlay: TextOverlay): void {
     const newStart = snapTimelineTicks(Math.max(0, startStart + deltaTicks));
     overlay.startTicks = newStart;
     overlay.endTicks = newStart + duration;
-    scheduleTextTrackRender();
+    requestTimelineDraw();
     void seekToTimelineTicks(playheadTicks);
     showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, formatRulerTime(ticksToSeconds(newStart)));
   }
@@ -3651,7 +4145,7 @@ function beginTextOverlayTrim(event: PointerEvent, overlay: TextOverlay, handle:
       const candidate = snapTimelineTicks(Math.max(startStart + minDuration, startEnd + deltaTicks));
       overlay.endTicks = Math.max(candidate, startStart + minDuration);
     }
-    scheduleTextTrackRender();
+    requestTimelineDraw();
     void seekToTimelineTicks(playheadTicks);
     const edgeTicks = handle === "left" ? overlay.startTicks : overlay.endTicks;
     showFloatingTooltip(
@@ -3673,49 +4167,6 @@ function beginTextOverlayTrim(event: PointerEvent, overlay: TextOverlay, handle:
 
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
-}
-
-/** Fila propia (aparte de las pistas de vídeo/audio) con un bloque por overlay de texto, en coordenadas absolutas de la timeline — pueden solaparse entre sí, a diferencia de los clips. Clic para seleccionar (editar/borrar en el panel lateral o con Supr), arrastra para mover, bordes para recortar duración. */
-function renderTextTrack(): void {
-  timelineTextTrack.innerHTML = "";
-  if (!timeline) return;
-
-  for (const overlay of textOverlays) {
-    const startPx = ticksToSeconds(overlay.startTicks) * pixelsPerSecond;
-    const widthPx = Math.max(10, ticksToSeconds(overlay.endTicks - overlay.startTicks) * pixelsPerSecond);
-
-    const block = document.createElement("div");
-    block.className = "timeline-text-clip" + (overlay.id === selectedOverlayId ? " selected" : "");
-    block.style.left = `${Math.round(TRACK_GUTTER_WIDTH_PX + startPx)}px`;
-    block.style.width = `${Math.round(widthPx)}px`;
-    block.title = overlay.text;
-
-    const label = document.createElement("span");
-    label.className = "text-clip-label";
-    label.textContent = overlay.text;
-    block.appendChild(label);
-
-    const leftHandle = document.createElement("div");
-    leftHandle.className = "trim-handle trim-handle-left";
-    leftHandle.title = "Arrastra para ajustar el inicio";
-    leftHandle.addEventListener("pointerdown", (event) => beginTextOverlayTrim(event, overlay, "left"));
-
-    const rightHandle = document.createElement("div");
-    rightHandle.className = "trim-handle trim-handle-right";
-    rightHandle.title = "Arrastra para ajustar el final";
-    rightHandle.addEventListener("pointerdown", (event) => beginTextOverlayTrim(event, overlay, "right"));
-
-    block.append(leftHandle, rightHandle);
-
-    block.addEventListener("pointerdown", (event) => {
-      const targetEl = event.target as HTMLElement;
-      if (targetEl.closest(".trim-handle")) return;
-      selectTextOverlay(overlay.id);
-      beginTextOverlayMove(event, overlay);
-    });
-
-    timelineTextTrack.appendChild(block);
-  }
 }
 
 // --- Menú de aplicación (nativo en Electron, desplegable propio en el navegador) ---
@@ -3765,6 +4216,11 @@ const MENU_ACTIONS: Record<string, () => void> = {
   "toggle-snap": () => clickIfEnabled(snapToggleButton),
   "flag-clip": () => clickIfEnabled(flagClipButton),
   "delete-clip": () => clickIfEnabled(deleteClipButton),
+  "ripple-delete": () => deleteSelectedClips(true),
+  "duplicate-clips": duplicateSelectedClips,
+  "copy-clips": () => void copySelectedClips(),
+  "paste-clips": pasteClipboard,
+  "select-all-clips": selectAllClips,
   "add-marker": () => clickIfEnabled(addMarkerButton),
   "add-text": () => clickIfEnabled(addTextButton),
   "zoom-in": () => clickIfEnabled(zoomInButton),
@@ -3796,6 +4252,11 @@ const MENU_ACTION_GATES: Record<string, HTMLButtonElement> = {
   "toggle-snap": snapToggleButton,
   "flag-clip": flagClipButton,
   "delete-clip": deleteClipButton,
+  "ripple-delete": deleteClipButton,
+  "duplicate-clips": deleteClipButton,
+  "copy-clips": deleteClipButton,
+  "paste-clips": addMarkerButton,
+  "select-all-clips": addMarkerButton,
   "add-marker": addMarkerButton,
   "add-text": addTextButton,
   "zoom-in": zoomInButton,
@@ -3826,7 +4287,12 @@ const APP_MENU: { group: string; items: { label: string; action: string }[] }[] 
       { label: "Cortar clip en el playhead (C)", action: "split" },
       { label: "Imán / snapping (N)", action: "toggle-snap" },
       { label: "Bandera en el clip seleccionado (G)", action: "flag-clip" },
-      { label: "Eliminar clip seleccionado (Supr)", action: "delete-clip" },
+      { label: "Eliminar clip(s) seleccionado(s) (Supr)", action: "delete-clip" },
+      { label: "Eliminar cerrando el hueco (Mayús+Supr)", action: "ripple-delete" },
+      { label: "Duplicar clip(s) (Ctrl+D)", action: "duplicate-clips" },
+      { label: "Copiar clip(s) (Ctrl+C)", action: "copy-clips" },
+      { label: "Pegar en el playhead (Ctrl+V)", action: "paste-clips" },
+      { label: "Seleccionar todos los clips (Ctrl+A)", action: "select-all-clips" },
       { label: "Añadir marcador (M)", action: "add-marker" },
       { label: "Añadir texto", action: "add-text" },
     ],
@@ -3933,6 +4399,37 @@ window.addEventListener("keydown", (event) => {
 
   if (!timeline) return;
 
+  // Edición de la selección (ampliación del 2026-10-02). Solo con Ctrl/Cmd:
+  // las teclas sueltas C/A/D siguen siendo cortar/seleccionar/etc.
+  if (event.ctrlKey || event.metaKey) {
+    if (key === "c") {
+      event.preventDefault();
+      copySelectedClips();
+      return;
+    }
+    if (key === "x") {
+      event.preventDefault();
+      if (copySelectedClips()) deleteSelectedClips(false);
+      return;
+    }
+    if (key === "v") {
+      event.preventDefault();
+      pasteClipboard();
+      return;
+    }
+    if (key === "d") {
+      event.preventDefault();
+      duplicateSelectedClips();
+      return;
+    }
+    if (key === "a") {
+      event.preventDefault();
+      selectAllClips();
+      return;
+    }
+    return; // cualquier otro Ctrl+tecla: que lo maneje el navegador/menú nativo
+  }
+
   switch (event.key) {
     case " ":
       event.preventDefault();
@@ -3993,9 +4490,9 @@ window.addEventListener("keydown", (event) => {
         event.preventDefault();
         removeTextOverlay(selectedOverlayId);
         status.textContent = "Texto eliminado.";
-      } else if (selectedClip !== undefined) {
+      } else if (selectedClips.length > 0) {
         event.preventDefault();
-        removeClipRef(selectedClip.trackId, selectedClip.clipId);
+        deleteSelectedClips(event.shiftKey);
       }
       break;
     case "ArrowLeft":
@@ -4005,6 +4502,12 @@ window.addEventListener("keydown", (event) => {
     case "ArrowRight":
       event.preventDefault();
       stepFrame(1);
+      break;
+    case "Escape":
+      if (selectedClips.length > 0 && !isAppMenuOpen()) {
+        clearClipSelection();
+        renderTimelineSelection();
+      }
       break;
     case "Home":
       event.preventDefault();
@@ -4177,6 +4680,16 @@ projectSourcesInput.addEventListener("change", () => {
 });
 
 /** `manualFiles` son solo los que el usuario acaba de re-seleccionar a mano (emparejados por nombre); los que ya se resolvieron por ruta guardada están en `pendingAutoResolvedSources` (ver handleProjectFileSelected) y se fusionan aquí por sourceId. */
+/** Mayor sufijo numérico de `ids` ("clip-12", "transition-3"...) + 1. */
+function nextFreeIdNumber(ids: string[]): number {
+  let max = ids.length;
+  for (const id of ids) {
+    const match = /-(\d+)$/.exec(id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
 async function applyPendingProject(project: ProjectFile, manualFiles: File[]): Promise<void> {
   const manualByName = new Map(manualFiles.map((file) => [file.name, file]));
   const byId = new Map(pendingAutoResolvedSources);
@@ -4240,6 +4753,14 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
     return;
   }
 
+  let projectLuts: LutAsset[];
+  try {
+    projectLuts = projectLutAssets(project);
+  } catch (error) {
+    projectStatus.textContent = `LUT del proyecto inválida: ${error instanceof Error ? error.message : String(error)}`;
+    return;
+  }
+
   for (const entry of sources.values()) entry.player?.destroy();
   sources.clear();
   playerPoolOrder.length = 0;
@@ -4251,6 +4772,7 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
     outputResolution: project.outputResolution,
     outputFrameRate: project.outputFrameRate,
     ...(project.masterAudio ? { masterAudio: project.masterAudio } : {}),
+    ...(projectLuts.length > 0 ? { luts: projectLuts } : {}),
   };
   historyPast = [];
   historyFuture = [];
@@ -4268,6 +4790,7 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
     return undefined;
   })();
   selectedClip = firstClipRef;
+  selectedClips = firstClipRef ? [firstClipRef] : [];
   activeSegment = undefined;
   playheadTicks = 0;
 
@@ -4280,8 +4803,11 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
   enableEditingControls();
   syncMasterAudioPanel();
   nextSourceNumber = newSources.size + 1;
-  nextTrackNumber = timeline.tracks.length + 1;
-  nextClipNumber = timeline.tracks.reduce((sum, track) => sum + track.clips.length, 0) + 1;
+  // Siguiente número LIBRE de verdad (mayor sufijo usado + 1), no "cuántos
+  // hay + 1": tras borrar, duplicar o pegar, los ids ya no son correlativos
+  // y contar podía generar un id repetido.
+  nextTrackNumber = nextFreeIdNumber(timeline.tracks.map((t) => t.id));
+  nextClipNumber = nextFreeIdNumber(timeline.tracks.flatMap((track) => track.clips.map((c) => c.id)));
 
   hasAutoFitted = true;
   zoomToFit();

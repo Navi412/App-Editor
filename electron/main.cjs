@@ -55,7 +55,15 @@ function buildAppMenu() {
         { label: "Cortar clip en el playhead (C)", click: () => sendMenuAction("split") },
         { label: "Imán / snapping (N)", click: () => sendMenuAction("toggle-snap") },
         { label: "Bandera en el clip seleccionado (G)", click: () => sendMenuAction("flag-clip") },
-        { label: "Eliminar clip seleccionado (Supr)", click: () => sendMenuAction("delete-clip") },
+        { label: "Eliminar clip(s) seleccionado(s) (Supr)", click: () => sendMenuAction("delete-clip") },
+        { label: "Eliminar cerrando el hueco (Mayús+Supr)", click: () => sendMenuAction("ripple-delete") },
+        { type: "separator" },
+        // Sin acelerador nativo: Ctrl+D/C/V/A ya los captura el keydown del
+        // renderer (ver CLAUDE.md, "Menú de aplicación") — aquí solo la pista.
+        { label: "Duplicar clip(s) (Ctrl+D)", click: () => sendMenuAction("duplicate-clips") },
+        { label: "Copiar clip(s) (Ctrl+C)", click: () => sendMenuAction("copy-clips") },
+        { label: "Pegar en el playhead (Ctrl+V)", click: () => sendMenuAction("paste-clips") },
+        { label: "Seleccionar todos los clips (Ctrl+A)", click: () => sendMenuAction("select-all-clips") },
         { type: "separator" },
         { label: "Añadir marcador (M)", click: () => sendMenuAction("add-marker") },
         { label: "Añadir texto", click: () => sendMenuAction("add-text") },

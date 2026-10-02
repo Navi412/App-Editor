@@ -1,5 +1,29 @@
-import { NEUTRAL_COLOR_GRADE, type ChromaKey, type ColorFilterType, type ColorGrade } from "../core/types";
-import { needsColorGradeGL, type ColorGradeRenderer } from "./colorGradeGL";
+import { NEUTRAL_COLOR_GRADE, type ChromaKey, type Clip, type ColorFilterType, type ColorGrade, type LutAsset } from "../core/types";
+import { needsColorGradeGL, type ColorGradeRenderer, type ResolvedLut } from "./colorGradeGL";
+
+/**
+ * Todo lo que decide el aspecto de los fotogramas de un clip: preset CSS,
+ * grading real, croma y LUT 3D ya resuelta desde el registro del
+ * proyecto. Agrupado en un objeto (2026-10-02) en vez de un parámetro
+ * suelto más por cada ampliación de color.
+ */
+export interface FrameLook {
+  colorFilter?: ColorFilterType | undefined;
+  colorGrade?: ColorGrade | undefined;
+  chromaKey?: ChromaKey | undefined;
+  lut?: ResolvedLut | undefined;
+}
+
+/** Aspecto de un clip, resolviendo su `lut` (si la tiene) contra el registro `luts` de la timeline. */
+export function lookForClip(clip: Clip, luts: LutAsset[] | undefined): FrameLook {
+  const asset = clip.lut ? luts?.find((l) => l.id === clip.lut!.lutId) : undefined;
+  return {
+    colorFilter: clip.colorFilter,
+    colorGrade: clip.colorGrade,
+    chromaKey: clip.chromaKey,
+    lut: asset && clip.lut ? { asset, intensity: clip.lut.intensity } : undefined,
+  };
+}
 
 export interface Size {
   width: number;
@@ -52,8 +76,8 @@ export function colorFilterCss(colorFilter: ColorFilterType | undefined): string
 
 /**
  * Pinta un VideoFrame en `ctx` con aspect-fit sobre el tamaño `target`,
- * con barras negras si hace falta, aplicando `colorFilter` (preset CSS,
- * de siempre) y opcionalmente `colorGrade`/`chromaKey` (grading real +
+ * con barras negras si hace falta, aplicando `look.colorFilter` (preset
+ * CSS, de siempre) y opcionalmente grading/croma/LUT (grading real +
  * croma vía WebGL, ver media/colorGradeGL.ts — ampliación de alcance
  * del 2026-08-29). El grading se aplica ANTES del filtro CSS (orden
  * fijo, nunca al revés): si no hay `gradeRenderer` o ni `colorGrade` ni
@@ -69,18 +93,16 @@ export function drawFrameFit(
   ctx: FrameDrawTarget,
   frame: VideoFrame,
   target: Size,
-  colorFilter?: ColorFilterType,
-  colorGrade?: ColorGrade,
-  chromaKey?: ChromaKey,
+  look: FrameLook = {},
   gradeRenderer?: ColorGradeRenderer,
   clear: boolean = true,
 ): void {
   if (clear) ctx.clearRect(0, 0, target.width, target.height);
   const rect = computeFitRect({ width: frame.displayWidth, height: frame.displayHeight }, target);
-  ctx.filter = colorFilterCss(colorFilter);
+  ctx.filter = colorFilterCss(look.colorFilter);
   const source =
-    gradeRenderer && needsColorGradeGL(colorGrade, chromaKey)
-      ? gradeRenderer.draw(frame, colorGrade ?? NEUTRAL_COLOR_GRADE, chromaKey)
+    gradeRenderer && needsColorGradeGL(look.colorGrade, look.chromaKey, look.lut)
+      ? gradeRenderer.draw(frame, look.colorGrade ?? NEUTRAL_COLOR_GRADE, look.chromaKey, look.lut)
       : frame;
   ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height);
   ctx.filter = "none";

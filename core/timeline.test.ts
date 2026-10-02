@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { secondsToTicks } from "./time";
 import {
+  addLut,
   addTrack,
+  clampGroupMoveDelta,
+  duplicateClip,
+  findFreeSlotTicks,
+  moveClipsBy,
+  pasteClipCopy,
+  removeClips,
+  removeLut,
+  rippleDeleteClip,
+  setClipLut,
+  slipClip,
   addVolumeKeyframe,
   allAudioSchedules,
   appendClip,
@@ -1109,5 +1120,108 @@ describe("máster de audio", () => {
     expect(updated.masterAudio).toEqual(master);
     expect(updated.tracks).toBe(timeline.tracks);
     expect(timeline.masterAudio).toBeUndefined(); // pura: no muta el original
+  });
+});
+
+describe("edición avanzada (2026-10-02)", () => {
+  it("slipClip desliza el contenido sin mover ni alargar el clip, con tope en el archivo", () => {
+    const timeline = twoClipTimeline(); // b: 2s-5s en timeline, 5s-8s de su fuente
+    const slipped = slipClip(timeline, "video-1", "b", secondsToTicks(1), secondsToTicks(10));
+    const b = slipped.tracks[0]!.clips.find((c) => c.id === "b")!;
+    expect(b.startTicks).toBe(secondsToTicks(2));
+    expect(b.sourceInTicks).toBe(secondsToTicks(6));
+    expect(b.sourceOutTicks).toBe(secondsToTicks(9));
+    const clamped = slipClip(timeline, "video-1", "b", secondsToTicks(100), secondsToTicks(10));
+    expect(clamped.tracks[0]!.clips.find((c) => c.id === "b")!.sourceOutTicks).toBe(secondsToTicks(10));
+    const toStart = slipClip(timeline, "video-1", "b", -secondsToTicks(100), secondsToTicks(10));
+    expect(toStart.tracks[0]!.clips.find((c) => c.id === "b")!.sourceInTicks).toBe(0);
+  });
+
+  it("rippleDeleteClip cierra el hueco del clip borrado y conserva los huecos que ya había", () => {
+    const withGap = moveClipTo(twoClipTimeline(), "video-1", "b", secondsToTicks(3)); // hueco 2s-3s
+    const extra = insertClip(withGap, "video-1", clip("c", "source-c", 7, 0, 1)); // hueco 6s-7s
+    const clips = rippleDeleteClip(extra, "video-1", "a").tracks[0]!.clips;
+    expect(clips.map((c) => c.id)).toEqual(["b", "c"]);
+    expect(clips[0]!.startTicks).toBe(secondsToTicks(1));
+    expect(clips[1]!.startTicks).toBe(secondsToTicks(5));
+  });
+
+  it("removeClips borra varios clips, con y sin ripple", () => {
+    const base = insertClip(twoClipTimeline(), "video-1", clip("c", "source-c", 5, 0, 1));
+    const refs = [
+      { trackId: "video-1", clipId: "a" },
+      { trackId: "video-1", clipId: "b" },
+    ];
+    expect(removeClips(base, refs).tracks[0]!.clips.map((c) => [c.id, c.startTicks])).toEqual([["c", secondsToTicks(5)]]);
+    expect(removeClips(base, refs, true).tracks[0]!.clips.map((c) => [c.id, c.startTicks])).toEqual([["c", 0]]);
+  });
+
+  it("moveClipsBy mueve el grupo junto y se topa con los no seleccionados", () => {
+    let timeline = addTrack(twoClipTimeline(), "video-2", "video");
+    timeline = insertClip(timeline, "video-2", clip("x", "source-x", 1, 0, 1));
+    timeline = insertClip(timeline, "video-2", clip("y", "source-y", 4, 0, 1));
+    const refs = [
+      { trackId: "video-1", clipId: "b" },
+      { trackId: "video-2", clipId: "x" },
+    ];
+    // b está libre a la derecha, pero x (1s-2s) se topa con y (empieza en 4s): tope = 2s para todo el grupo.
+    const moved = moveClipsBy(timeline, refs, secondsToTicks(10));
+    expect(moved.tracks[0]!.clips.find((c) => c.id === "b")!.startTicks).toBe(secondsToTicks(4));
+    expect(moved.tracks[1]!.clips.find((c) => c.id === "x")!.startTicks).toBe(secondsToTicks(3));
+    // Hacia atrás, b se topa con a (no seleccionado), que acaba justo donde empieza b.
+    expect(clampGroupMoveDelta(timeline, refs, -secondsToTicks(1))).toBe(0);
+  });
+
+  it("los clips seleccionados no se bloquean entre sí al moverse juntos", () => {
+    const refs = [
+      { trackId: "video-1", clipId: "a" },
+      { trackId: "video-1", clipId: "b" },
+    ];
+    const moved = moveClipsBy(twoClipTimeline(), refs, secondsToTicks(1));
+    expect(moved.tracks[0]!.clips.map((c) => c.startTicks)).toEqual([secondsToTicks(1), secondsToTicks(3)]);
+  });
+
+  it("duplicateClip pone la copia detrás del original o en el siguiente hueco donde quepa", () => {
+    const dup = duplicateClip(twoClipTimeline(), "video-1", "a", "a2");
+    const copy = dup.tracks[0]!.clips.find((c) => c.id === "a2")!;
+    expect(copy.startTicks).toBe(secondsToTicks(5)); // a acaba en 2s pero b ocupa 2s-5s
+    expect(copy.sourceInTicks).toBe(0);
+    expect(dup.tracks[0]!.clips.map((c) => c.id)).toEqual(["a", "b", "a2"]);
+  });
+
+  it("findFreeSlotTicks encuentra el primer hueco suficiente", () => {
+    const track = moveClipTo(twoClipTimeline(), "video-1", "b", secondsToTicks(3)).tracks[0]!; // a 0-2, b 3-6
+    expect(findFreeSlotTicks(track, 0, secondsToTicks(1))).toBe(secondsToTicks(2));
+    expect(findFreeSlotTicks(track, 0, secondsToTicks(2))).toBe(secondsToTicks(6));
+  });
+
+  it("pasteClipCopy no copia transiciones", () => {
+    const transition = createTransition("t", 0, 100, "crossfade");
+    expect(() => pasteClipCopy(twoClipTimeline(), "video-1", transition, "t2", 0)).toThrow();
+  });
+});
+
+describe("LUTs del proyecto", () => {
+  const lut = { id: "lut-1", name: "Look", size: 2, data: new Float32Array(24) };
+
+  it("setClipLut exige que la LUT exista y recorta la intensidad", () => {
+    expect(() => setClipLut(twoClipTimeline(), "video-1", "a", { lutId: "lut-1", intensity: 1 })).toThrow();
+    const applied = setClipLut(addLut(twoClipTimeline(), lut), "video-1", "a", { lutId: "lut-1", intensity: 3 });
+    expect(applied.tracks[0]!.clips[0]!.lut).toEqual({ lutId: "lut-1", intensity: 1 });
+    expect(setClipLut(applied, "video-1", "a", undefined).tracks[0]!.clips[0]!.lut).toBeUndefined();
+  });
+
+  it("removeLut la quita también de los clips que la usaban", () => {
+    const applied = setClipLut(addLut(twoClipTimeline(), lut), "video-1", "a", { lutId: "lut-1", intensity: 0.5 });
+    const removed = removeLut(applied, "lut-1");
+    expect(removed.luts).toBeUndefined();
+    expect(removed.tracks[0]!.clips[0]!.lut).toBeUndefined();
+  });
+
+  it("isNeutralColorGrade tiene en cuenta los mandos nuevos y las curvas", () => {
+    expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, exposure: 0.5 })).toBe(false);
+    expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, temperature: -0.2 })).toBe(false);
+    const curves = { master: [{ x: 0, y: 0.1 }, { x: 1, y: 1 }], r: [], g: [], b: [] };
+    expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, curves })).toBe(false);
   });
 });

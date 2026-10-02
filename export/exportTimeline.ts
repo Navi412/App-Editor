@@ -11,7 +11,7 @@ import type { Clip, Timeline, Track } from "../core/types";
 import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import { playAudioSlice } from "../media/audioPlayer";
 import { createMasterAudioChain } from "../media/masterAudioChain";
-import { drawFrameFit } from "../media/render";
+import { drawFrameFit, lookForClip } from "../media/render";
 import type { DemuxedTrack } from "../media/samples";
 import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
 import { yieldToTaskQueue } from "../media/scheduling";
@@ -197,7 +197,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
             const belowTimeUs = Math.round(ticksToSeconds(below.sourceTimeTicks) * 1_000_000);
             const belowFrame = await seekerFor(below.sourceId).next(belowTimeUs);
             if (belowFrame) {
-              drawFrameFit(ctx, belowFrame, { width, height }, below.clip.colorFilter, below.clip.colorGrade, below.clip.chromaKey, gradeRenderer);
+              drawFrameFit(ctx, belowFrame, { width, height }, lookForClip(below.clip, timeline.luts), gradeRenderer);
               belowFrame.close();
               drewBackground = true;
             }
@@ -212,9 +212,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
             ctx,
             frame,
             { width, height },
-            position.clip.colorFilter,
-            position.clip.colorGrade,
-            position.clip.chromaKey,
+            lookForClip(position.clip, timeline.luts),
             gradeRenderer,
             !position.clip.chromaKey?.enabled, // clear:false si ya se dibujó un fondo encima del que componer
           );

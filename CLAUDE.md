@@ -67,9 +67,12 @@ cada clip pegado a su vídeo:
   `moveClipTo`; si no cabe en ese hueco, lanza — en la UI
   (`beginClipMoveDrag`) eso significa que el clip sigue en su pista
   original mientras el cursor esté sobre un hueco demasiado pequeño. Su
-  audio pegado viaja con él (es el mismo `Clip`). Los clips de las
-  pistas de AUDIO independientes siguen sin gesto de mover (ni dentro
-  de su pista ni entre pistas) — solo tienen el arrastre de volumen.
+  audio pegado viaja con él (es el mismo `Clip`). Desde el 2026-10-02
+  los clips de las pistas de AUDIO independientes también se mueven
+  (dentro de su pista y entre pistas de audio, mismo `moveClipToTrack`)
+  y se recortan por sus bordes; el volumen se arrastra agarrando la
+  propia línea naranja (antes, toda la celda) — ver "Edición avanzada"
+  más abajo.
 - Las transiciones siguen siendo un concepto por-pista-de-vídeo (funden
   entre los dos clips vecinos de SU MISMA pista): no reproducen vídeo
   propio, congelan el último fotograma del clip anterior y el primero
@@ -139,9 +142,24 @@ Dos consecuencias arquitectónicas, ambas en marcha:
   leer cualquier archivo local que el usuario del SO pueda leer — para
   una app de escritorio de un solo usuario, sin contenido remoto, es un
   riesgo bajo y aceptado, no un descuido.
-- **Timeline dibujada en canvas**, sustituyendo al DOM de `<div>`s por
-  clip actual — ver el plan en curso, referenciado desde esta sección
-  mientras se implementa por fases.
+- **Timeline dibujada en canvas** (hecho el 2026-10-02).
+  `ui/timelineCanvas.ts` (`TimelineCanvasView`) pinta en UN `<canvas>`
+  la regla, marcadores, todas las filas (clips con tira de miniaturas,
+  transiciones, formas de onda con su envolvente de volumen, textos),
+  el recuadro de selección y el playhead — solo lo visible (virtualizado
+  en X e Y), como mucho una vez por fotograma (`requestTimelineDraw`,
+  throttle a rAF). Responde "qué hay en este píxel" con `hitTest`; los
+  gestos siguen en `ui/main.ts` (`handleTimelinePointerDown` reparte a
+  mover/recortar/slip/volumen/recuadro). Las filas salen de
+  `computeRows` (mismo orden que antes: capa más alta arriba, audio
+  pegado debajo de cada vídeo, textos al final). La columna de gutters
+  (nombre editable, ojo/mute, menú ⋮, asas de altura) sigue siendo DOM:
+  son controles de formulario, no hay nada que ganar pintándolos.
+  Scroll nativo: `#timeline-content` solo tiene el tamaño total, y el
+  canvas —del tamaño de la parte visible— cuelga de un ancla `sticky`
+  de tamaño cero (`.timeline-canvas-sticky`) y se repinta con
+  scrollLeft/scrollTop. Los colores salen de las variables CSS del tema
+  (releídas al cambiar `data-theme`).
 
 Deliberadamente **fuera** de esta ampliación: explorador/selector de
 carpeta de medios y watcher de cambios en disco — no hay UI hoy para
@@ -232,6 +250,60 @@ separado porque son independientes entre sí:
   perfecta que la exportación ya proporciona. Documentado explícitamente
   en la UI (panel de croma), no un olvido.
 
+**Edición avanzada y color ampliado — ampliación pedida explícitamente
+el 2026-10-02** (el usuario eligió exactamente estas, ver abajo):
+
+- **Multiselección.** `selectedClips` (conjunto) además de
+  `selectedClip` (el principal, el que edita el inspector).
+  Ctrl/Mayús+clic añade/quita; arrastrar en una zona vacía de las
+  pistas hace un recuadro (con Ctrl/Mayús, suma); un clic en vacío
+  mueve el playhead y deselecciona (antes arrastrar en vacío hacía
+  scrub — el scrub sigue en la regla). Arrastrar un clip de la
+  selección mueve el grupo entero (`moveClipsBy`/`clampGroupMoveDelta`
+  en `core/timeline.ts`: mismo desplazamiento, cada uno en su pista,
+  tope contra los NO seleccionados, sin cambiar de pista). Ctrl+A
+  selecciona todo, Esc deselecciona.
+- **Ripple delete y duplicar/copiar/pegar.** Supr borra la selección;
+  Mayús+Supr además cierra los huecos (`rippleDeleteClip`/`removeClips`).
+  Ctrl+D duplica detrás del original (`duplicateClip`); Ctrl+C/X/V
+  copia/corta/pega en el playhead conservando la disposición del grupo
+  (`pasteClipCopy` + `findFreeSlotTicks`: primer hueco libre donde
+  quepa, nunca pisa ni empuja). El portapapeles es de la sesión, no
+  del sistema. Las transiciones no se copian (dependen de sus vecinos).
+- **Slip edit.** Alt+arrastre sobre un clip de vídeo desliza su
+  contenido (`sourceIn/Out` juntos) sin moverlo ni cambiar su duración
+  (`slipClip`), con el preview siguiendo el fotograma. En las filas de
+  audio Alt sigue siendo "punto de volumen", así que el slip es solo en
+  la fila de vídeo.
+- **Mover clips de las pistas de audio** (quitado de "fuera de
+  alcance"): ver más arriba. Para poder llenarlas, el bin de medios
+  tiene un botón ♪ que añade el audio de una fuente al final de la
+  primera pista de audio (`addAudioClipFromSource`).
+- **Temperatura/tinte, exposición, sombras/luces.** Campos nuevos de
+  `ColorGrade` (neutros = 0). `normalizeColorGrade` (`core/color.ts`)
+  rellena los que falten en proyectos/filtros propios guardados antes.
+  Orden fijo en el shader: exposición y balance de blancos → CDL →
+  sombras/luces → saturación/contraste → curvas → LUT → inversión. El
+  croma se calcula sobre el color ORIGINAL (graduar no cambia qué se
+  recorta).
+- **Curvas RGB.** `ColorGrade.curves` (maestra + R/G/B, puntos 0-1),
+  interpolación monótona Fritsch-Carlson (`evaluateCurve`, nunca
+  rebota) precalculada a una tabla 256×1 (`buildCurveTable`) que el
+  shader muestrea. Editor en el inspector (subsección Curvas): clic
+  añade punto, arrastrar lo mueve, doble clic lo quita; guarda al
+  soltar, como las barras.
+- **LUT 3D .cube.** `Timeline.luts: LutAsset[]` es un registro del
+  proyecto (como las fuentes) y `Clip.lut = { lutId, intensity }` lo
+  referencia. `parseCubeLut`/`serializeCubeLut` en `core/color.ts`; el
+  proyecto guarda el TEXTO .cube de cada LUT (autocontenido, no depende
+  del archivo original). WebGL2 la sube como textura 3D RGB16F
+  (interpolación trilineal por hardware). `removeLut` la quita también
+  de los clips que la usaban. Las LUT no forman parte de los "filtros
+  propios" (esos van por equipo, las LUT por proyecto).
+- `drawFrameFit` recibe ahora un `FrameLook` (`media/render.ts`,
+  `lookForClip` resuelve la LUT del clip) en vez de un parámetro suelto
+  por cada ampliación de color; preview y exportación lo usan igual.
+
 **Filtros de color propios y grading sin "Aplicar" — ampliación pedida
 explícitamente el 2026-10-01.** Además de los 6 presets fijos, el
 usuario puede guardar sus propios filtros: botón "Guardar como filtro"
@@ -265,7 +337,7 @@ clip. `setClipFlagged` en `core/timeline.ts` (pura, misma forma que
 los demás campos opcionales de `Clip`.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
-ampliarlo:** mover clips de las pistas de audio independientes, importar archivos
+ampliarlo:** importar archivos
 de solo audio (mp3/wav) como fuente propia para una pista de audio,
 cambios de velocidad de reproducción de un CLIP (retiming/slow-motion
 — distinto del shuttle J/K/L de arriba, que es solo transporte de
@@ -469,7 +541,8 @@ menú), sin tocar `/core`, `/media` ni `/export`:
 - **mp4box.js** para demuxear (leer `moov`, tabla de muestras, keyframes) y
   muxear el contenedor MP4 de salida.
 - **Canvas 2D** (`OffscreenCanvas` donde se pueda, para no bloquear el hilo
-  principal) para componer cada fotograma antes de previsualizar o codificar.
+  principal) para componer cada fotograma antes de previsualizar o codificar,
+  y también para pintar la línea de tiempo entera (`ui/timelineCanvas.ts`).
 - **WebGL2** (`media/colorGradeGL.ts`), solo para el grading real/croma
   (ver "Grading real (WebGL) y croma" más abajo) — el resto del
   pipeline sigue siendo Canvas 2D; el resultado de WebGL se pinta sobre
@@ -543,11 +616,26 @@ sincronización.
 `npm run electron:start` compila y abre la app en una ventana de
 Electron (Chromium empaquetado, no WebView2 — evita depender de la
 versión de WebView2 instalada en cada máquina para WebCodecs/
-OffscreenCanvas). `npm run electron:build` genera un instalador con
-electron-builder — en esta máquina falla por un problema conocido de
-electron-builder en Windows sin el Modo de desarrollador activado
-(necesita crear symlinks para herramientas de macOS que no usamos). El
-empaquetado manual (copiar `node_modules/electron/dist`, renombrar
+OffscreenCanvas).
+
+**Instalador (2026-10-02):** `npm run electron:build` genera
+`release/AppVideo-Setup-<versión>.exe` (NSIS, en español, por usuario
+sin pedir admin, permite elegir carpeta, accesos en escritorio y menú
+Inicio; config en `build` de package.json). Icono: `build/icon.png`,
+generado por `npm run icon` (`scripts/generate-icon.mjs`, sin
+dependencias) y versionado. Sin firma de código (no hay certificado):
+Windows SmartScreen avisará la primera vez. Problema conocido:
+electron-builder descarga `winCodeSign` (rcedit, necesario para
+incrustar el icono en el .exe) en un .7z que trae symlinks de macOS, y
+sin Modo de desarrollador Windows no deja crearlos y la extracción
+falla. Arreglo aplicado en esta máquina (una vez, en la caché, no en el
+repo): extraer ese .7z a
+`%LOCALAPPDATA%\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0`
+excluyendo `darwin` (`7za x <archivo>.7z -o<esa carpeta> -xr!darwin`,
+con el 7za de `node_modules/7zip-bin`). En otra máquina: activar el Modo
+de desarrollador, repetir ese paso, o como último recurso
+`-c.win.signAndEditExecutable=false` (instala igual, pero el .exe
+lleva el icono genérico de Electron). El empaquetado manual (copiar `node_modules/electron/dist`, renombrar
 `electron.exe`, y colocar `dist/` + todo `electron/` (main.cjs Y
 preload.cjs — antes solo main.cjs, ya no basta) + un `package.json`
 mínimo en `resources/app/`) es el método oficial de Electron para

@@ -1,7 +1,10 @@
+import { isIdentityCurves } from "./color";
 import { ticksToSeconds } from "./time";
 import type {
   ChromaKey,
   Clip,
+  ClipLut,
+  LutAsset,
   ColorFilterType,
   ColorGrade,
   MasterAudio,
@@ -616,8 +619,201 @@ export function isNeutralColorGrade(grade: ColorGrade): boolean {
     grade.gainB === 1 &&
     grade.saturation === 1 &&
     grade.contrast === 1 &&
-    !grade.invert
+    !grade.invert &&
+    grade.exposure === 0 &&
+    grade.temperature === 0 &&
+    grade.tint === 0 &&
+    grade.shadows === 0 &&
+    grade.highlights === 0 &&
+    isIdentityCurves(grade.curves)
   );
+}
+
+/** Aplica (o quita, con undefined) una LUT del registro a un clip. Lanza si `clipLut.lutId` no existe en `timeline.luts`. La intensidad se recorta a 0-1. */
+export function setClipLut(timeline: Timeline, trackId: string, clipId: string, clipLut: ClipLut | undefined): Timeline {
+  if (clipLut && !(timeline.luts ?? []).some((l) => l.id === clipLut.lutId)) {
+    throw new RangeError(`LUT no encontrada: ${clipLut.lutId}`);
+  }
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const { lut: _previous, ...rest } = track.clips[index]!;
+    const clips = [...track.clips];
+    clips[index] = clipLut ? { ...rest, lut: { lutId: clipLut.lutId, intensity: Math.max(0, Math.min(1, clipLut.intensity)) } } : rest;
+    return { ...track, clips };
+  });
+}
+
+/** Añade una LUT al registro del proyecto (o la sustituye si ya hay una con el mismo id). */
+export function addLut(timeline: Timeline, lut: LutAsset): Timeline {
+  const others = (timeline.luts ?? []).filter((l) => l.id !== lut.id);
+  return { ...timeline, luts: [...others, lut] };
+}
+
+/** Quita una LUT del registro y de todos los clips que la usaban — nunca deja un clip apuntando a una LUT inexistente. */
+export function removeLut(timeline: Timeline, lutId: string): Timeline {
+  const luts = (timeline.luts ?? []).filter((l) => l.id !== lutId);
+  const tracks = timeline.tracks.map((track) => ({
+    ...track,
+    clips: track.clips.map((clip) => {
+      if (clip.lut?.lutId !== lutId) return clip;
+      const { lut: _removed, ...rest } = clip;
+      return rest;
+    }),
+  }));
+  const next: Timeline = { ...timeline, tracks };
+  if (luts.length > 0) next.luts = luts;
+  else delete next.luts;
+  return next;
+}
+
+// --- Edición avanzada (ampliación pedida explícitamente el 2026-10-02):
+// slip, ripple delete, multiselección, duplicar/pegar. ---
+
+/** Referencia a un clip dentro de una pista concreta. */
+export interface ClipLocation {
+  trackId: string;
+  clipId: string;
+}
+
+/**
+ * Slip edit: desliza el CONTENIDO del clip dentro de su ventana sin
+ * moverlo en la timeline ni cambiar su duración — `sourceInTicks` y
+ * `sourceOutTicks` se desplazan juntos `deltaTicks` (positivo = se ve
+ * material más tardío del archivo). Se recorta para no salirse de
+ * [0, sourceDurationTicks]. `startTicks` no cambia, así que nunca puede
+ * solapar a nadie. Las transiciones no tienen contenido: lanza.
+ */
+export function slipClip(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  deltaTicks: number,
+  sourceDurationTicks: number,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    if (clip.kind === "transition") throw new RangeError("Una transición no tiene contenido que deslizar");
+    const duration = clipDurationTicks(clip);
+    const maxIn = Math.max(0, sourceDurationTicks - duration);
+    const newIn = Math.max(0, Math.min(maxIn, clip.sourceInTicks + deltaTicks));
+    const clips = [...track.clips];
+    clips[index] = { ...clip, sourceInTicks: newIn, sourceOutTicks: newIn + duration };
+    return { ...track, clips };
+  });
+}
+
+/**
+ * Elimina un clip Y cierra el hueco que deja: todos los clips de la
+ * MISMA pista que empiezan en o después de su final retroceden su
+ * duración (ripple delete clásico). Un hueco que ya existía después del
+ * clip se conserva tal cual — solo se cierra el tramo que ocupaba él.
+ */
+export function rippleDeleteClip(timeline: Timeline, trackId: string, clipId: string): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const clip = track.clips[requireClipIndex(track, clipId)]!;
+    const endTicks = clipEndTicks(clip);
+    const duration = clipDurationTicks(clip);
+    const clips = track.clips
+      .filter((c) => c.id !== clipId)
+      .map((c) => (c.startTicks >= endTicks ? { ...c, startTicks: c.startTicks - duration } : c));
+    return { ...track, clips };
+  });
+}
+
+/** Elimina varios clips (de una o varias pistas) de una vez. Con `ripple`, cada pista cierra los huecos que dejan — se procesan de derecha a izquierda para que cada cierre no descoloque a los siguientes. */
+export function removeClips(timeline: Timeline, refs: ClipLocation[], ripple: boolean = false): Timeline {
+  let next = timeline;
+  const located = refs
+    .map((ref) => {
+      const track = next.tracks.find((t) => t.id === ref.trackId);
+      const clip = track?.clips.find((c) => c.id === ref.clipId);
+      return clip ? { ref, startTicks: clip.startTicks } : undefined;
+    })
+    .filter((x): x is { ref: ClipLocation; startTicks: number } => x !== undefined)
+    .sort((a, b) => b.startTicks - a.startTicks);
+  for (const { ref } of located) {
+    next = ripple ? rippleDeleteClip(next, ref.trackId, ref.clipId) : removeClip(next, ref.trackId, ref.clipId);
+  }
+  return next;
+}
+
+/**
+ * Desplazamiento permitido para mover JUNTOS los clips `refs` en
+ * `deltaTicks`, recortado para que ninguno quede en negativo ni se meta
+ * encima de un clip NO seleccionado de su pista (los seleccionados se
+ * mueven en bloque, así que entre ellos nunca chocan). Mismo "toparse
+ * con el vecino" que moveClipTo, pero calculado sobre el conjunto.
+ */
+export function clampGroupMoveDelta(timeline: Timeline, refs: ClipLocation[], deltaTicks: number): number {
+  let minDelta = -Infinity;
+  let maxDelta = Infinity;
+  const selected = new Set(refs.map((r) => `${r.trackId}\u0000${r.clipId}`));
+  for (const ref of refs) {
+    const track = timeline.tracks.find((t) => t.id === ref.trackId);
+    const clip = track?.clips.find((c) => c.id === ref.clipId);
+    if (!track || !clip) continue;
+    minDelta = Math.max(minDelta, -clip.startTicks);
+    for (const other of track.clips) {
+      if (selected.has(`${track.id}\u0000${other.id}`)) continue;
+      if (clipEndTicks(other) <= clip.startTicks) minDelta = Math.max(minDelta, clipEndTicks(other) - clip.startTicks);
+      if (other.startTicks >= clipEndTicks(clip)) maxDelta = Math.min(maxDelta, other.startTicks - clipEndTicks(clip));
+    }
+  }
+  if (minDelta > maxDelta) return 0;
+  return Math.max(minDelta, Math.min(maxDelta, deltaTicks));
+}
+
+/** Mueve juntos (mismo desplazamiento, cada uno en su pista) los clips `refs` — ver clampGroupMoveDelta. */
+export function moveClipsBy(timeline: Timeline, refs: ClipLocation[], deltaTicks: number): Timeline {
+  const delta = clampGroupMoveDelta(timeline, refs, deltaTicks);
+  if (delta === 0) return timeline;
+  const byTrack = new Map<string, Set<string>>();
+  for (const ref of refs) {
+    if (!byTrack.has(ref.trackId)) byTrack.set(ref.trackId, new Set());
+    byTrack.get(ref.trackId)!.add(ref.clipId);
+  }
+  const tracks = timeline.tracks.map((track) => {
+    const ids = byTrack.get(track.id);
+    if (!ids) return track;
+    return { ...track, clips: sortByStart(track.clips.map((c) => (ids.has(c.id) ? { ...c, startTicks: c.startTicks + delta } : c))) };
+  });
+  return { ...timeline, tracks };
+}
+
+/** Primer instante >= `fromTicks` en el que cabe un clip de `durationTicks` en `track` sin solapar a nadie. */
+export function findFreeSlotTicks(track: Track, fromTicks: number, durationTicks: number): number {
+  let candidate = Math.max(0, fromTicks);
+  for (const other of sortByStart(track.clips)) {
+    if (clipEndTicks(other) <= candidate) continue;
+    if (other.startTicks >= candidate + durationTicks) break;
+    candidate = clipEndTicks(other);
+  }
+  return candidate;
+}
+
+/**
+ * Inserta en la pista `trackId` una copia de `clip` (con `newId`) en el
+ * primer hueco libre a partir de `fromTicks` donde quepa entero — nunca
+ * pisa ni empuja otros clips. Es la base de duplicar (Ctrl+D, desde el
+ * final del original) y pegar (Ctrl+V, desde el playhead). Las
+ * transiciones no se copian (dependen de sus vecinos exactos): lanza.
+ */
+export function pasteClipCopy(timeline: Timeline, trackId: string, clip: Clip, newId: string, fromTicks: number): Timeline {
+  if (clip.kind === "transition") throw new RangeError("Las transiciones no se pueden copiar");
+  const track = timeline.tracks[requireTrackIndex(timeline, trackId)]!;
+  if (clip.lut && !(timeline.luts ?? []).some((l) => l.id === clip.lut!.lutId)) {
+    throw new RangeError("El clip usa una LUT que no está en este proyecto");
+  }
+  const startTicks = findFreeSlotTicks(track, fromTicks, clipDurationTicks(clip));
+  return insertClip(timeline, trackId, { ...clip, id: newId, startTicks });
+}
+
+/** Duplica el clip justo detrás de sí mismo (o en el primer hueco libre después) en su misma pista. */
+export function duplicateClip(timeline: Timeline, trackId: string, clipId: string, newId: string): Timeline {
+  const track = timeline.tracks[requireTrackIndex(timeline, trackId)]!;
+  const clip = track.clips[requireClipIndex(track, clipId)]!;
+  return pasteClipCopy(timeline, trackId, clip, newId, clipEndTicks(clip));
 }
 
 /** Cambia (o quita, con undefined) el croma de un clip. Ver ChromaKey. */

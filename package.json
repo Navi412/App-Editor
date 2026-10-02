@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "electron:start": "vite build && electron .",
-    "electron:build": "vite build && electron-builder"
+    "electron:build": "vite build && electron-builder --win nsis",
+    "icon": "node scripts/generate-icon.mjs"
   },
   "devDependencies": {
     "electron": "^32.3.3",
@@ -27,14 +28,34 @@
     "appId": "com.ivanmv.appvideo",
     "productName": "App Video",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
+      "!dist/*.mp4",
+      "!dist/*.cube",
       "electron/**/*"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "App Video",
+      "installerLanguages": [
+        "es_ES"
+      ],
+      "language": "3082",
+      "artifactName": "AppVideo-Setup-${version}.${ext}",
+      "deleteAppDataOnUninstall": false
     }
-  }
+  },
+  "description": "Editor de vídeo de escritorio (multipista, grading, exportación a MP4)",
+  "author": "Iván"
 }

@@ -19,6 +19,40 @@
 // elegir) o de un JSON de proyecto que el propio usuario escribió.
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 const fs = require("node:fs/promises");
+const path = require("node:path");
+const os = require("node:os");
+
+// Caché de proxies de edición (media/proxy.ts) en disco, para no
+// regenerarlos en cada sesión. La página solo puede nombrar entradas por
+// una clave hexadecimal (hash calculado en el renderer): nunca rutas, así
+// que esto no amplía qué puede escribir — solo dentro de esta carpeta.
+const PROXY_CACHE_DIR = path.join(process.env.LOCALAPPDATA || os.tmpdir(), "AppVideo", "proxies");
+const PROXY_CACHE_MAX_BYTES = 3 * 1024 * 1024 * 1024;
+const PROXY_KEY = /^[0-9a-f]{16,64}$/;
+
+function proxyCachePath(key) {
+  if (!PROXY_KEY.test(key)) throw new Error("Clave de caché inválida");
+  return path.join(PROXY_CACHE_DIR, key + ".proxy");
+}
+
+/** Borra los proxies más antiguos (por último uso) hasta quedar por debajo del tope. */
+async function pruneProxyCache() {
+  const names = await fs.readdir(PROXY_CACHE_DIR).catch(() => []);
+  const entries = [];
+  for (const name of names) {
+    if (!name.endsWith(".proxy")) continue;
+    const full = path.join(PROXY_CACHE_DIR, name);
+    const stat = await fs.stat(full).catch(() => undefined);
+    if (stat) entries.push({ full, size: stat.size, used: stat.mtimeMs });
+  }
+  let total = entries.reduce((sum, e) => sum + e.size, 0);
+  entries.sort((a, b) => a.used - b.used);
+  for (const entry of entries) {
+    if (total <= PROXY_CACHE_MAX_BYTES) break;
+    await fs.rm(entry.full, { force: true });
+    total -= entry.size;
+  }
+}
 
 contextBridge.exposeInMainWorld("appVideo", {
   /** Ruta absoluta real de un File ya elegido por el usuario (selector nativo o input de proyecto). Síncrono, sin IPC. */
@@ -45,6 +79,31 @@ contextBridge.exposeInMainWorld("appVideo", {
     } finally {
       await handle.close();
     }
+  },
+  /** Tamaño y fecha de modificación de un archivo por ruta (para reconocer si cambió). */
+  async fileStat(filePath) {
+    const stat = await fs.stat(filePath);
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
+  },
+  /** Proxy guardado con esa clave, o null. Marca su uso (para la limpieza por antigüedad). */
+  async proxyCacheRead(key) {
+    const file = proxyCachePath(key);
+    try {
+      const buffer = await fs.readFile(file);
+      const now = new Date();
+      await fs.utimes(file, now, now).catch(() => {});
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+    } catch {
+      return null;
+    }
+  },
+  /** Guarda un proxy con esa clave y limpia la caché si pasa del tope. */
+  async proxyCacheWrite(key, bytes) {
+    await fs.mkdir(PROXY_CACHE_DIR, { recursive: true });
+    const file = proxyCachePath(key);
+    await fs.writeFile(file + ".tmp", Buffer.from(bytes));
+    await fs.rename(file + ".tmp", file);
+    await pruneProxyCache();
   },
   /** true si `filePath` sigue existiendo — usado para reemparejar un proyecto guardado sin pedirle al usuario que re-seleccione archivos que no se han movido. */
   async fileExists(filePath) {

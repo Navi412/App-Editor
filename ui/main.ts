@@ -101,7 +101,7 @@ import {
   type VideoLayer,
 } from "../core/transform";
 import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
-import { createProxy, proxyBytes, shouldCreateProxy } from "../media/proxy";
+import { createProxy, deserializeProxy, proxyBytes, serializeProxy, shouldCreateProxy } from "../media/proxy";
 import { drawTextOverlays } from "../media/textOverlayRender";
 import {
   captureTransitionBoundaryFrames,
@@ -3994,6 +3994,18 @@ async function runProxyQueue(): Promise<void> {
   proxyJob = { sourceId, abort };
   let lastShown = -1;
   try {
+    // ¿Ya se generó en otra sesión? (solo en Electron, ver proxyCacheKey)
+    const cacheKey = await proxyCacheKey(entry).catch(() => undefined);
+    const bridge = getAppVideoBridge();
+    if (cacheKey && bridge) {
+      const cached = await bridge.proxyCacheRead(cacheKey).catch(() => null);
+      const proxy = cached ? deserializeProxy(cached) : undefined;
+      if (proxy && sources.get(sourceId) === entry && !abort.signal.aborted) {
+        entry.proxy = proxy;
+        entry.proxyStatus = `proxy listo (${Math.round(proxyBytes(proxy) / 1_000_000)} MB, guardado)`;
+        return;
+      }
+    }
     const proxy = await createProxy(entry.demuxed, {
       signal: abort.signal,
       onProgress: (done, total) => {
@@ -4009,6 +4021,11 @@ async function runProxyQueue(): Promise<void> {
       entry.proxy = proxy;
       entry.proxyStatus = `proxy listo (${Math.round(proxyBytes(proxy) / 1_000_000)} MB)`;
       status.textContent = `Proxy de ${entry.fileName} listo: el preview irá más fluido.`;
+      if (cacheKey && bridge) {
+        bridge.proxyCacheWrite(cacheKey, serializeProxy(proxy)).catch((error: unknown) => {
+          console.warn("No se pudo guardar el proxy en disco:", error);
+        });
+      }
     }
   } catch (error) {
     if (!abort.signal.aborted) {
@@ -4020,6 +4037,20 @@ async function runProxyQueue(): Promise<void> {
     renderMediaBin();
     void runProxyQueue();
   }
+}
+
+/**
+ * Clave de la caché de proxies en disco: hash de la ruta, el tamaño y la
+ * fecha de modificación del archivo original (si cambia, otro proxy) y
+ * de la versión del formato. undefined fuera de Electron o sin ruta.
+ */
+async function proxyCacheKey(entry: SourceEntry): Promise<string | undefined> {
+  const bridge = getAppVideoBridge();
+  if (!bridge || !entry.filePath) return undefined;
+  const stat = await bridge.fileStat(entry.filePath);
+  const identity = `proxy-v1|${entry.filePath.toLowerCase()}|${stat.size}|${Math.round(stat.mtimeMs)}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+  return Array.from(new Uint8Array(digest).subarray(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** Para todo lo pendiente (p.ej. al abrir otro proyecto). Los proxies ya hechos se quedan con su fuente. */

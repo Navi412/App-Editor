@@ -481,8 +481,12 @@ mientras estaba fuera; cada una va en su propio commit):
   por defecto). Medido con una grabación de OBS (AV1 1440p60, 52 s): el
   proxy tarda ~11 s en generarse con decodificación por hardware
   (`createForwardFrameSeeker(…, "prefer-hardware")`; por software eran
-  90 s) y el salto medio del player baja de ~160 ms a ~10 ms. No se
-  guardan en disco: se regeneran en cada sesión.
+  90 s) y el salto medio del player baja de ~160 ms a ~10 ms. En
+  Electron se guardan en disco (%LOCALAPPDATA%AppVideoproxies, tope de
+  3 GB, se borra antes lo menos usado; preload `proxyCacheRead/Write`
+  solo con claves hex, nunca rutas). La clave es un hash de
+  ruta+tamaño+fecha del original. Al reabrir, el proxy de 52 s carga en
+  ~0,8 s en vez de ~11 s.
 - **Transformación con keyframes y composición** (`core/transform.ts`).
   `Clip.transform` (fija) o `Clip.transformKeyframes` (animada):
   posición (fracción del lienzo desde el centro), escala sobre el

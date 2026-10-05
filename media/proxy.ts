@@ -175,3 +175,69 @@ export async function createProxy(source: DemuxedTrack, options: ProxyOptions = 
 export function proxyBytes(proxy: DemuxedTrack): number {
   return proxy.samples.reduce((sum, sample) => sum + (sample.data?.byteLength ?? 0), 0);
 }
+
+// --- Formato del proxy en disco (caché, ver electron/preload.cjs) ---
+// [4 bytes: longitud de la cabecera][cabecera JSON UTF-8][description][datos de muestras]
+// La cabecera lleva la pista, la frame rate y, por muestra, cts/duración/keyframe/tamaño.
+
+const PROXY_FORMAT_VERSION = 1;
+
+interface ProxyHeader {
+  v: number;
+  videoTrack: DemuxedTrack["videoTrack"];
+  frameRate: NonNullable<DemuxedTrack["frameRate"]> | null;
+  descriptionSize: number;
+  samples: Array<[cts: number, duration: number, key: 0 | 1, size: number]>;
+}
+
+export function serializeProxy(proxy: DemuxedTrack): ArrayBuffer {
+  const description = proxy.decoderDescription ?? new Uint8Array(0);
+  const header: ProxyHeader = {
+    v: PROXY_FORMAT_VERSION,
+    videoTrack: proxy.videoTrack,
+    frameRate: proxy.frameRate ?? null,
+    descriptionSize: description.byteLength,
+    samples: proxy.samples.map((s) => [s.cts, s.duration, s.is_sync ? 1 : 0, s.data?.byteLength ?? 0]),
+  };
+  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+  const dataSize = header.samples.reduce((sum, sample) => sum + sample[3], 0);
+  const out = new Uint8Array(4 + headerBytes.byteLength + description.byteLength + dataSize);
+  new DataView(out.buffer).setUint32(0, headerBytes.byteLength);
+  out.set(headerBytes, 4);
+  let offset = 4 + headerBytes.byteLength;
+  out.set(description, offset);
+  offset += description.byteLength;
+  for (const sample of proxy.samples) {
+    if (!sample.data) continue;
+    out.set(sample.data, offset);
+    offset += sample.data.byteLength;
+  }
+  return out.buffer;
+}
+
+/** undefined si el formato no es el esperado (versión antigua, archivo truncado...). */
+export function deserializeProxy(buffer: ArrayBuffer): DemuxedTrack | undefined {
+  try {
+    const bytes = new Uint8Array(buffer);
+    const headerSize = new DataView(buffer).getUint32(0);
+    const header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + headerSize))) as ProxyHeader;
+    if (header.v !== PROXY_FORMAT_VERSION) return undefined;
+    let offset = 4 + headerSize;
+    const description = bytes.slice(offset, offset + header.descriptionSize);
+    offset += header.descriptionSize;
+    const samples: DemuxedSample[] = header.samples.map(([cts, duration, key, size]) => {
+      const data = bytes.subarray(offset, offset + size);
+      offset += size;
+      return { cts, duration, timescale: 1_000_000, is_sync: key === 1, data };
+    });
+    if (offset !== bytes.byteLength) return undefined;
+    return {
+      videoTrack: header.videoTrack,
+      samples,
+      ...(description.byteLength > 0 ? { decoderDescription: description } : {}),
+      ...(header.frameRate ? { frameRate: header.frameRate } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}

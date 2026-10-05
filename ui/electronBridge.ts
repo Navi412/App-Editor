@@ -17,6 +17,12 @@ export interface AppVideoBridge {
   fileSize(filePath: string): Promise<number>;
   /** Bytes [start, end) de un archivo por ruta, sin leerlo entero. */
   readFileRange(filePath: string, start: number, end: number): Promise<ArrayBuffer>;
+  /** Tamaño y fecha de modificación de un archivo por ruta. */
+  fileStat(filePath: string): Promise<{ size: number; mtimeMs: number }>;
+  /** Proxy de edición guardado con esa clave (hex), o null. */
+  proxyCacheRead(key: string): Promise<ArrayBuffer | null>;
+  /** Guarda un proxy de edición con esa clave (hex). */
+  proxyCacheWrite(key: string, bytes: ArrayBuffer): Promise<void>;
   /** true si `filePath` sigue existiendo en disco. */
   fileExists(filePath: string): Promise<boolean>;
   /** Se suscribe a las acciones del menú de aplicación nativo (ver electron/main.cjs). Solo existe dentro de Electron. */

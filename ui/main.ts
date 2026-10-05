@@ -75,7 +75,7 @@ import {
   normalizeCurve,
   parseCubeLut,
 } from "../core/color";
-import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
+import { ExportCancelledError, exportTimelineToMp4, type ExportVideoCodec } from "../export/exportTimeline";
 import { byteSourceFromPath, getAppVideoBridge, readFileFromPath } from "./electronBridge";
 import { AUDIO_FILE_EXTENSIONS, decodeAudioAsset, isAudioOnlyFile } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
@@ -196,6 +196,9 @@ const previewZoomButton = requireElement<HTMLButtonElement>("#preview-zoom-butto
 const canvas = requireElement<HTMLCanvasElement>("#preview");
 const status = requireElement<HTMLSpanElement>("#status");
 const exportQualitySelect = requireElement<HTMLSelectElement>("#export-quality");
+const exportCodecSelect = requireElement<HTMLSelectElement>("#export-codec");
+const exportRangeSelect = requireElement<HTMLSelectElement>("#export-range");
+const exportRangeHint = requireElement<HTMLParagraphElement>("#export-range-hint");
 const exportResolutionPresetSelect = requireElement<HTMLSelectElement>("#export-resolution-preset");
 const exportButton = requireElement<HTMLButtonElement>("#export-button");
 const cancelExportButton = requireElement<HTMLButtonElement>("#cancel-export-button");
@@ -358,6 +361,9 @@ let nextClipNumber = 1;
 let nextTrackNumber = 1;
 let nextOverlayNumber = 1;
 let markers: MarkerState[] = [];
+/** Marcas de entrada/salida (teclas I/O) para exportar un tramo — estado de la sesión, no se guardan en el proyecto. */
+let markInTicks: number | undefined;
+let markOutTicks: number | undefined;
 let textOverlays: TextOverlay[] = [];
 
 // Un único AudioContext para toda la sesión — reproducir un clip crea
@@ -1047,6 +1053,10 @@ function timelineViewState(): TimelineViewState | undefined {
     totalTicks: timelineTotalTicks,
     playheadTicks,
     markers: markers.map((marker) => marker.ticks),
+    inOut: {
+      ...(markInTicks !== undefined ? { inTicks: markInTicks } : {}),
+      ...(markOutTicks !== undefined ? { outTicks: markOutTicks } : {}),
+    },
     textOverlays,
     isSelected: isClipSelected,
     selectedOverlayId,
@@ -4672,6 +4682,24 @@ window.addEventListener("keydown", (event) => {
       event.preventDefault();
       if (!addMarkerButton.disabled) addMarkerAtPlayhead();
       break;
+    case "i":
+    case "I":
+      if (!timeline) break;
+      event.preventDefault();
+      setInOutMark("in", playheadTicks);
+      break;
+    case "o":
+    case "O":
+      if (!timeline) break;
+      event.preventDefault();
+      setInOutMark("out", playheadTicks);
+      break;
+    case "x":
+    case "X":
+      if (!event.altKey || !timeline) break;
+      event.preventDefault();
+      setInOutMark("clear", 0);
+      break;
     // J/K/L: shuttle clásico de NLE, pedido explícito del 2026-08-29.
     // L reproduce hacia delante, K para — ambos reutilizan
     // exactamente lo que ya hacían Espacio/togglePlayPause, sin
@@ -4745,16 +4773,75 @@ function resolveExportResolution(base: Resolution): Resolution {
   return { width, height };
 }
 
+/** I/O/Alt+X: marcas de entrada/salida para "Exportar entre las marcas". Si quedan cruzadas, se intercambian. */
+function setInOutMark(which: "in" | "out" | "clear", ticks: number): void {
+  if (which === "clear") {
+    markInTicks = undefined;
+    markOutTicks = undefined;
+    exportRangeSelect.value = "all";
+    status.textContent = "Marcas de entrada/salida quitadas.";
+  } else {
+    if (which === "in") markInTicks = ticks;
+    else markOutTicks = ticks;
+    if (markInTicks !== undefined && markOutTicks !== undefined && markInTicks > markOutTicks) {
+      [markInTicks, markOutTicks] = [markOutTicks, markInTicks];
+    }
+    exportRangeSelect.value = "inout";
+    status.textContent = `Marca de ${which === "in" ? "entrada" : "salida"} en ${formatRulerTime(ticksToSeconds(ticks))}.`;
+  }
+  syncExportRangeHint();
+  requestTimelineDraw();
+}
+
+/** Deshabilita "H.265" en el panel Exportar si este equipo no tiene codificador (p.ej. en el navegador sin la feature de Electron, o sin GPU compatible). */
+async function detectHevcExportSupport(): Promise<void> {
+  const option = exportCodecSelect.querySelector<HTMLOptionElement>('option[value="hevc"]');
+  if (!option || typeof VideoEncoder === "undefined") return;
+  const support = await VideoEncoder.isConfigSupported({
+    codec: "hvc1.1.6.L123.B0",
+    width: 1920,
+    height: 1080,
+    bitrate: 8_000_000,
+    framerate: 30,
+    ...({ hevc: { format: "hevc" } } as object),
+  }).catch(() => ({ supported: false }));
+  if (!support.supported) {
+    option.disabled = true;
+    option.textContent = "H.265 (no disponible en este equipo)";
+  }
+}
+void detectHevcExportSupport();
+
+function syncExportRangeHint(): void {
+  if (markInTicks === undefined && markOutTicks === undefined) {
+    exportRangeHint.innerHTML = "Marca entrada y salida con <kbd>I</kbd> / <kbd>O</kbd> en el playhead (<kbd>Alt</kbd>+<kbd>X</kbd> las quita).";
+    return;
+  }
+  const from = formatRulerTime(ticksToSeconds(markInTicks ?? 0));
+  const to = markOutTicks !== undefined ? formatRulerTime(ticksToSeconds(markOutTicks)) : "el final";
+  exportRangeHint.textContent = `Tramo marcado: de ${from} a ${to}.`;
+}
+
 exportButton.addEventListener("click", () => {
   if (!timeline) return;
   const outputResolution = resolveExportResolution(timeline.outputResolution);
   const bitrate = Number(exportQualitySelect.value) || undefined;
-  void runExport({ ...timeline, outputResolution }, bitrate);
+  const useRange = exportRangeSelect.value === "inout" && (markInTicks !== undefined || markOutTicks !== undefined);
+  const range = useRange
+    ? { startTicks: markInTicks ?? 0, endTicks: markOutTicks ?? timelineDurationTicks(timeline) }
+    : undefined;
+  const videoCodec = exportCodecSelect.value === "hevc" ? "hevc" : "avc";
+  void runExport({ ...timeline, outputResolution }, bitrate, range, videoCodec);
 });
 
 let exportAbortController: AbortController | undefined;
 
-async function runExport(timelineToExport: Timeline, bitrate: number | undefined): Promise<void> {
+async function runExport(
+  timelineToExport: Timeline,
+  bitrate: number | undefined,
+  range?: { startTicks: number; endTicks: number },
+  videoCodec: ExportVideoCodec = "avc",
+): Promise<void> {
   stopPlayback();
   exportButton.disabled = true;
   cancelExportButton.hidden = false;
@@ -4770,6 +4857,8 @@ async function runExport(timelineToExport: Timeline, bitrate: number | undefined
       getAudio: (sourceId) => sources.get(sourceId)?.audio,
       textOverlays,
       ...(bitrate !== undefined ? { bitrate } : {}),
+      ...(range ? { range } : {}),
+      videoCodec,
       signal: exportAbortController.signal,
       onProgress: (done, total) => {
         exportProgress.max = total;

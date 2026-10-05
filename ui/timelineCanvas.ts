@@ -104,6 +104,8 @@ export interface TimelineViewState {
   totalTicks: number;
   playheadTicks: number;
   markers: number[];
+  /** Marcas de entrada/salida (I/O) para exportar un tramo; cualquiera de las dos puede faltar. */
+  inOut: { inTicks?: number; outTicks?: number };
   textOverlays: TextOverlay[];
   isSelected: (trackId: string, clipId: string) => boolean;
   selectedOverlayId: string | undefined;
@@ -391,6 +393,21 @@ export class TimelineCanvasView {
         ctx.fillStyle = p.textDim;
         ctx.fillText(formatTimelineTime(Math.round(t * 1000) / 1000), x + 3, 3);
       }
+    }
+
+    // Rango de entrada/salida (I/O): franja de acento en la regla y bordes verticales.
+    const { inTicks, outTicks } = state.inOut;
+    if (inTicks !== undefined || outTicks !== undefined) {
+      const x0 = this.xForTicks(state, inTicks ?? 0);
+      const x1 = this.xForTicks(state, outTicks ?? state.totalTicks);
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = p.accent;
+      ctx.fillRect(x0, 0, Math.max(1, x1 - x0), RULER_HEIGHT_PX);
+      ctx.globalAlpha = 1;
+      if (inTicks !== undefined) ctx.fillRect(Math.round(x0) - 1, 0, 2, RULER_HEIGHT_PX);
+      if (outTicks !== undefined) ctx.fillRect(Math.round(x1) - 1, 0, 2, RULER_HEIGHT_PX);
+      ctx.restore();
     }
 
     // Marcadores: triángulo naranja colgando de la regla.

@@ -46,6 +46,12 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 // hardware o resoluciones concretas en todos los navegadores —
 // isConfigSupported() decide cuál usar en vez de asumirlo.
 const CODEC_CANDIDATES = ["avc1.640028", "avc1.4d0028", "avc1.42001f"];
+// H.265 (mejora del 2026-10-05): archivos ~40 % más pequeños a igual
+// calidad. Main a niveles 4.1/5.0/5.1 (hasta 4K). En Chromium solo hay
+// codificador HEVC por hardware, así que puede no estar disponible.
+const HEVC_CODEC_CANDIDATES = ["hvc1.1.6.L123.B0", "hvc1.1.6.L150.B0", "hvc1.1.6.L153.B0"];
+
+export type ExportVideoCodec = "avc" | "hevc";
 
 // Se prueba primero CON aceleración por hardware (NVENC/QuickSync/etc. — la
 // exportación es la parte más intensiva en cómputo de todo el pipeline, así
@@ -56,9 +62,11 @@ const HARDWARE_PREFERENCES: HardwareAcceleration[] = ["prefer-hardware", "no-pre
 
 async function selectSupportedEncoderConfig(
   base: Omit<VideoEncoderConfig, "codec" | "hardwareAcceleration">,
+  videoCodec: ExportVideoCodec = "avc",
 ): Promise<VideoEncoderConfig> {
+  const candidates = videoCodec === "hevc" ? HEVC_CODEC_CANDIDATES : CODEC_CANDIDATES;
   for (const hardwareAcceleration of HARDWARE_PREFERENCES) {
-    for (const codec of CODEC_CANDIDATES) {
+    for (const codec of candidates) {
       const config: VideoEncoderConfig = { ...base, codec, hardwareAcceleration };
       try {
         const support = await VideoEncoder.isConfigSupported(config);
@@ -69,7 +77,9 @@ async function selectSupportedEncoderConfig(
     }
   }
   throw new Error(
-    "Ningún códec H.264 candidato es compatible con este navegador para esta resolución",
+    videoCodec === "hevc"
+      ? "Este equipo no puede codificar H.265 a esta resolución (necesita codificador por hardware). Exporta en H.264."
+      : "Ningún códec H.264 candidato es compatible con este navegador para esta resolución",
   );
 }
 
@@ -83,6 +93,10 @@ export interface ExportOptions {
   bitrate?: number;
   /** Si se aborta, la exportación se detiene lanzando ExportCancelledError en el siguiente punto de comprobación (por fotograma de vídeo, o por bloque de audio). */
   signal?: AbortSignal;
+  /** Exportar solo este tramo de la timeline (marcas de entrada/salida, mejora del 2026-10-05). Sin él, la timeline entera. */
+  range?: { startTicks: number; endTicks: number };
+  /** Códec de vídeo de salida (por defecto H.264). */
+  videoCodec?: ExportVideoCodec;
 }
 
 /**
@@ -99,10 +113,13 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
   const { timeline, getSource, getAudio, textOverlays = [], onProgress, signal } = options;
   const { width, height } = timeline.outputResolution;
   const outputFrameRate = timeline.outputFrameRate;
-  const totalTicks = timelineDurationTicks(timeline);
+  const timelineTicksTotal = timelineDurationTicks(timeline);
+  const rangeStartTicks = Math.max(0, Math.min(options.range?.startTicks ?? 0, timelineTicksTotal));
+  const rangeEndTicks = Math.max(rangeStartTicks, Math.min(options.range?.endTicks ?? timelineTicksTotal, timelineTicksTotal));
+  const totalTicks = rangeEndTicks - rangeStartTicks;
   const stepTicks = frameDurationTicks(outputFrameRate);
   if (totalTicks <= 0 || stepTicks <= 0) {
-    throw new Error("La timeline no tiene fotogramas que exportar");
+    throw new Error(options.range ? "El rango a exportar está vacío" : "La timeline no tiene fotogramas que exportar");
   }
   const totalFrames = Math.ceil(totalTicks / stepTicks);
   const fps = outputFrameRate.numerator / outputFrameRate.denominator;
@@ -125,15 +142,18 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
   }
 
   const durationUnits = Math.round(ticksToSeconds(totalTicks) * 1_000_000);
-  const muxer = createMp4Muxer({ width, height, timescale: 1_000_000, durationUnits });
+  const videoCodec = options.videoCodec ?? "avc";
+  const muxer = createMp4Muxer({ width, height, timescale: 1_000_000, durationUnits, videoCodec });
 
   const encoderConfig = await selectSupportedEncoderConfig({
     width,
     height,
     bitrate: options.bitrate ?? DEFAULT_BITRATE,
     framerate: fps,
-    avc: { format: "avc" },
-  });
+    // Formato "contenedor" (avcC/hvcC fuera de banda), el que espera el muxer.
+    // `hevc` aún no está en los tipos DOM de TypeScript.
+    ...(videoCodec === "hevc" ? ({ hevc: { format: "hevc" } } as object) : { avc: { format: "avc" } }),
+  }, videoCodec);
 
   const encoder = new VideoEncoder({
     output: (chunk, metadata) => muxer.addChunk(chunk, metadata),
@@ -171,7 +191,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
   try {
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       throwIfAborted(signal);
-      const timelineTicks = frameIndex * stepTicks;
+      const timelineTicks = rangeStartTicks + frameIndex * stepTicks;
       const position = resolveActiveVideoPosition(timeline, timelineTicks);
 
       if (!position) {
@@ -247,7 +267,7 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
     await encoder.flush();
 
     if (getAudio) {
-      await exportAudioTrack(timeline, getAudio, muxer, signal);
+      await exportAudioTrack(timeline, getAudio, muxer, signal, rangeStartTicks, rangeEndTicks);
     }
   } finally {
     encoder.close();
@@ -305,6 +325,8 @@ async function exportAudioTrack(
   getAudio: (sourceId: string) => AudioBuffer | undefined,
   muxer: Mp4Muxer,
   signal: AbortSignal | undefined,
+  rangeStartTicks: number,
+  rangeEndTicks: number,
 ): Promise<void> {
   const hasAnyAudio = allAudioSchedules(timeline).some((schedule) => getAudio(schedule.sourceId) !== undefined);
   if (!hasAnyAudio) return;
@@ -338,15 +360,20 @@ async function exportAudioTrack(
     channelData.push(buffer.getChannelData(channel));
   }
 
+  // Solo el tramo exportado (el render cubre la timeline entera: así las
+  // colas de las transiciones y la automatización salen igual que en ella).
+  const firstFrame = Math.min(buffer.length, Math.round(ticksToSeconds(rangeStartTicks) * buffer.sampleRate));
+  const endFrame = Math.min(buffer.length, Math.round(ticksToSeconds(rangeEndTicks) * buffer.sampleRate));
+
   try {
-    for (let start = 0; start < buffer.length; start += AUDIO_FRAME_SIZE) {
+    for (let start = firstFrame; start < endFrame; start += AUDIO_FRAME_SIZE) {
       throwIfAborted(signal);
-      const frameLength = Math.min(AUDIO_FRAME_SIZE, buffer.length - start);
+      const frameLength = Math.min(AUDIO_FRAME_SIZE, endFrame - start);
       const planar = new Float32Array(frameLength * buffer.numberOfChannels);
       for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
         planar.set(channelData[channel]!.subarray(start, start + frameLength), channel * frameLength);
       }
-      const timestampUs = Math.round((start / buffer.sampleRate) * 1_000_000);
+      const timestampUs = Math.round(((start - firstFrame) / buffer.sampleRate) * 1_000_000);
       const audioData = new AudioData({
         format: "f32-planar",
         sampleRate: buffer.sampleRate,

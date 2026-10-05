@@ -12,6 +12,8 @@ export interface Mp4MuxerOptions {
   timescale: number;
   /** Duración total esperada, en unidades de `timescale`. Solo se usa para declarar duration/media_duration en la pista — no afecta la muxación en sí. */
   durationUnits?: number;
+  /** Códec de la pista de vídeo (por defecto H.264): decide la caja de configuración (avcC/hvcC). */
+  videoCodec?: "avc" | "hevc";
 }
 
 export interface Mp4Muxer {
@@ -36,12 +38,13 @@ export function createMp4Muxer(options: Mp4MuxerOptions): Mp4Muxer {
 
   function ensureVideoTrack(description: ArrayBuffer): number {
     if (videoTrackId !== undefined) return videoTrackId;
+    const hevc = options.videoCodec === "hevc";
     const id = isoFile.addTrack({
       timescale: options.timescale,
       width: options.width,
       height: options.height,
-      avcDecoderConfigRecord: description,
-      type: "avc1",
+      ...(hevc ? { hevcDecoderConfigRecord: description } : { avcDecoderConfigRecord: description }),
+      type: hevc ? "hvc1" : "avc1",
       name: "App Video export — vídeo",
       duration: options.durationUnits ?? 0,
       media_duration: options.durationUnits ?? 0,
@@ -83,7 +86,7 @@ export function createMp4Muxer(options: Mp4MuxerOptions): Mp4Muxer {
       }
       if (videoTrackId === undefined) {
         throw new Error(
-          "El primer fotograma de vídeo codificado no trae la configuración del decodificador (avcC)",
+          "El primer fotograma de vídeo codificado no trae la configuración del decodificador (avcC/hvcC)",
         );
       }
 

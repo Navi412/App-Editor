@@ -447,6 +447,19 @@ mientras estaba fuera; cada una va en su propio commit):
   audio (misma posición, volumen y puntos de volumen) y silencia el
   original. Usa la primera pista de audio con ese hueco libre, o crea
   una.
+- **Exportar un tramo (marcas I/O) y en H.265.** I/O ponen las marcas
+  de entrada/salida en el playhead y Alt+X las quita (estado de la
+  sesión, no se guarda en el proyecto). La regla las sombrea
+  (`TimelineViewState.inOut`) y "Qué exportar" elige entre toda la
+  timeline o el tramo (`ExportOptions.range`). El audio se renderiza
+  entero y se codifica solo el tramo, así colas y automatización salen
+  igual. "Códec" admite H.264 o H.265 (`ExportOptions.videoCodec`; el
+  muxer escribe hvc1+hvcC). Chromium 128 trae el codificador H.265 de
+  la plataforma desactivado: `electron/main.cjs` activa
+  `PlatformHEVCEncoderSupport` (comprobado que sin ella
+  `isConfigSupported` rechaza hvc1 a cualquier resolución).
+  `detectHevcExportSupport` deshabilita la opción donde no hay
+  codificador (navegador, GPU sin H.265).
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**

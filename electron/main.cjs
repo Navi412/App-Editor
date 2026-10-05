@@ -5,6 +5,13 @@
 const { app, BrowserWindow, Menu } = require("electron");
 const path = require("node:path");
 
+// Codificador H.265 de la plataforma (Media Foundation en Windows, por
+// hardware) para "Exportar en H.265". Chromium 128 (Electron 32) lo trae
+// pero desactivado por defecto; comprobado que con esta feature
+// VideoEncoder.isConfigSupported pasa a aceptar hvc1. Si la GPU no lo
+// tiene, la UI deshabilita la opción (ver detectHevcExportSupport).
+app.commandLine.appendSwitch("enable-features", "PlatformHEVCEncoderSupport");
+
 /** Ventana principal — se guarda para poder enviarle las acciones del menú nativo. */
 let mainWindow = null;
 

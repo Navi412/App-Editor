@@ -236,6 +236,16 @@ export interface Clip {
    * alcance pedida explícitamente el 2026-08-29. Por defecto false/undefined.
    */
   videoHidden?: boolean;
+  /**
+   * Velocidad de reproducción del clip (solo kind === "clip"): 0.5 =
+   * cámara lenta a la mitad, 2 = el doble de rápido. undefined = 1. El
+   * clip ocupa en la timeline (sourceOut − sourceIn) / speed — ver
+   * clipDurationTicks/timelineToSourceTicks en core/timeline.ts, el
+   * ÚNICO sitio que hace esa conversión. El audio se acelera/ralentiza
+   * con él (y cambia de tono, como un cambio de velocidad sin
+   * estiramiento temporal). Mejora pedida el 2026-10-05.
+   */
+  speed?: number;
   /** Solo relevante si kind === "transition". */
   transitionType?: TransitionType;
   /** Puntos de volumen dentro del clip (orden ascendente por offsetTicks) — ver VolumeKeyframe. undefined/[] = volumen plano (`volume`). */

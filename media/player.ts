@@ -24,8 +24,12 @@ export interface VideoPlayer {
    * de decodificación hasta la muestra objetivo, descartar el resto.
    */
   seekTo(timeUs: number): Promise<void>;
-  /** Reproduce hacia delante desde la posición actual hasta endUs (o hasta el final si se omite). */
-  play(endUs?: number): void;
+  /**
+   * Reproduce hacia delante desde la posición actual hasta endUs (o hasta
+   * el final si se omite). `rate`: velocidad del clip (Clip.speed) — 2 =
+   * avanza dos segundos de fuente por segundo real.
+   */
+  play(endUs?: number, rate?: number): void;
   pause(): void;
   destroy(): void;
 }
@@ -80,6 +84,8 @@ export function createVideoPlayer(
   let rafHandle = 0;
   let wallClockStartMs = 0;
   let startPositionUs = 0;
+  /** Velocidad de la reproducción en curso (ver play). */
+  let playbackRate = 1;
   let playbackPositionUs = 0;
   let currentEndUs: number | undefined;
   // Un scrub rápido puede disparar varios seekTo() solapados: cada
@@ -252,7 +258,7 @@ export function createVideoPlayer(
 
   function tick(): void {
     if (!playing) return;
-    const nowUs = startPositionUs + (performance.now() - wallClockStartMs) * 1000;
+    const nowUs = startPositionUs + (performance.now() - wallClockStartMs) * 1000 * playbackRate;
 
     // Frame-hold: se muestra el fotograma más reciente cuyo PTS ya
     // pasó; los que quedaron obsoletos entre tick y tick se cierran
@@ -386,9 +392,10 @@ export function createVideoPlayer(
     videoTrack,
     durationSeconds,
     seekTo,
-    play(endUs?: number): void {
+    play(endUs?: number, rate = 1): void {
       if (playing) return;
       currentEndUs = endUs;
+      playbackRate = rate > 0 ? rate : 1;
       playing = true;
       wallClockStartMs = performance.now();
       startPositionUs = playbackPositionUs;

@@ -460,12 +460,26 @@ mientras estaba fuera; cada una va en su propio commit):
   `isConfigSupported` rechaza hvc1 a cualquier resolución).
   `detectHevcExportSupport` deshabilita la opción donde no hay
   codificador (navegador, GPU sin H.265).
+- **Velocidad por clip** (`Clip.speed`, de 0,25× a 4×; quitado de
+  "fuera de alcance"). Constante en todo el clip, sin rampas. El clip
+  ocupa (sourceOut − sourceIn) / speed en la timeline. Las únicas
+  conversiones están en `core/timeline.ts`: `clipDurationTicks`,
+  `timelineToSourceTicks` y `sourceToTimelineTicks`. Las usan cortar,
+  ripple, resolver la posición activa, las franjas de audio
+  (`AudioSchedule.playbackRate`) y la UI (recorte por arrastre en ×speed,
+  insertar transición, onda). `setClipSpeed` cambia la velocidad sin
+  mover el inicio, reescala los puntos de volumen y lanza si el clip
+  alargado pisaría al siguiente. Audio por `playbackRate` (cambia el
+  tono); vídeo en directo con `player.play(endUs, rate)`. El roll edit
+  se niega entre clips a velocidad ≠ 1 (el redondeo no garantiza que
+  el corte siga pegado). Desplegable "Velocidad" en el inspector; la
+  timeline muestra "· 200 %" en el clip.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**
-cambios de velocidad de reproducción de un CLIP (retiming/slow-motion
-— distinto del shuttle J/K/L de arriba, que es solo transporte de
-edición y no toca ningún dato del proyecto), compositing
+rampas de velocidad dentro de un clip y estiramiento de audio sin
+cambio de tono (la velocidad constante por clip sí está, ver "Mejoras
+del 2026-10-05"), compositing
 tipo Fusion (keying con tracking/despill, máscaras, nodos), soporte de
 códecs RAW de cámara o más allá de lo que WebCodecs ya decodifique de
 forma nativa.

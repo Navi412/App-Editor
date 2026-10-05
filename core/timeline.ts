@@ -23,7 +23,32 @@ import type {
  */
 
 export function clipDurationTicks(clip: Clip): number {
-  return clip.sourceOutTicks - clip.sourceInTicks;
+  const speed = clipSpeed(clip);
+  const sourceSpan = clip.sourceOutTicks - clip.sourceInTicks;
+  return speed === 1 ? sourceSpan : Math.round(sourceSpan / speed);
+}
+
+/** Velocidades admitidas para un clip (ver Clip.speed). */
+export const MIN_CLIP_SPEED = 0.25;
+export const MAX_CLIP_SPEED = 4;
+
+/** Velocidad efectiva de un clip (1 si no tiene, o si es una transición). */
+export function clipSpeed(clip: Clip): number {
+  return clip.kind === "clip" ? (clip.speed ?? 1) : 1;
+}
+
+/** Instante de la FUENTE que se ve en el instante `timelineTicks` de la timeline, dentro de `clip` (teniendo en cuenta su velocidad). */
+export function timelineToSourceTicks(clip: Clip, timelineTicks: number): number {
+  const speed = clipSpeed(clip);
+  const offset = timelineTicks - clip.startTicks;
+  return clip.sourceInTicks + (speed === 1 ? offset : Math.round(offset * speed));
+}
+
+/** Inverso de timelineToSourceTicks: en qué instante de la timeline se ve el instante `sourceTicks` de la fuente de `clip`. */
+export function sourceToTimelineTicks(clip: Clip, sourceTicks: number): number {
+  const speed = clipSpeed(clip);
+  const offset = sourceTicks - clip.sourceInTicks;
+  return clip.startTicks + (speed === 1 ? offset : Math.round(offset / speed));
 }
 
 /** Instante (exclusivo) en el que termina el clip en la timeline de su pista. */
@@ -113,7 +138,7 @@ export function resolveActiveVideoPosition(timeline: Timeline, timelineTicks: nu
       clipIndex,
       trackId: track.id,
       sourceId: clip.sourceId,
-      sourceTimeTicks: clip.sourceInTicks + (timelineTicks - clip.startTicks),
+      sourceTimeTicks: timelineToSourceTicks(clip, timelineTicks),
     };
   }
   return null;
@@ -146,7 +171,7 @@ export function resolveActiveVideoPositionBelow(
       clipIndex,
       trackId: track.id,
       sourceId: clip.sourceId,
-      sourceTimeTicks: clip.sourceInTicks + (timelineTicks - clip.startTicks),
+      sourceTimeTicks: timelineToSourceTicks(clip, timelineTicks),
     };
   }
   return null;
@@ -385,13 +410,15 @@ export function splitClipAt(
     }
 
     const [firstId, secondId] = newIds;
-    const sourceSplitTicks = clip.sourceInTicks + (timelineTicks - clip.startTicks);
+    const sourceSplitTicks = timelineToSourceTicks(clip, timelineTicks);
     const firstHalf: Clip = { ...clip, id: firstId, sourceOutTicks: sourceSplitTicks };
     const secondHalf: Clip = {
       ...clip,
       id: secondId,
       sourceInTicks: sourceSplitTicks,
-      startTicks: timelineTicks,
+      // = timelineTicks a velocidad normal; con otra velocidad, el final
+      // real (redondeado) del primer trozo — así siguen pegados.
+      startTicks: clipEndTicks(firstHalf),
     };
 
     const clips = [...track.clips];
@@ -496,7 +523,7 @@ export function trimClipInRipple(
       throw new RangeError("El recorte dejaría el clip por debajo de la duración mínima");
     }
     const originalEndTicks = clipEndTicks(clip);
-    const newEndTicks = clip.startTicks + (clip.sourceOutTicks - newSourceInTicks);
+    const newEndTicks = clipEndTicks({ ...clip, sourceInTicks: newSourceInTicks });
     const shifted = rippleShiftFrom(track, originalEndTicks, newEndTicks - originalEndTicks);
     const clips = shifted.map((c) => (c.id === clipId ? { ...c, sourceInTicks: newSourceInTicks } : c));
     return { ...track, clips };
@@ -518,7 +545,7 @@ export function trimClipOutRipple(
       throw new RangeError("El recorte dejaría el clip por debajo de la duración mínima");
     }
     const originalEndTicks = clipEndTicks(clip);
-    const newEndTicks = clip.startTicks + (newSourceOutTicks - clip.sourceInTicks);
+    const newEndTicks = clipEndTicks({ ...clip, sourceOutTicks: newSourceOutTicks });
     const shifted = rippleShiftFrom(track, originalEndTicks, newEndTicks - originalEndTicks);
     const clips = shifted.map((c) => (c.id === clipId ? { ...c, sourceOutTicks: newSourceOutTicks } : c));
     return { ...track, clips };
@@ -550,6 +577,11 @@ export function rollEdit(
     const left = track.clips[requireClipIndex(track, leftClipId)]!;
     const right = track.clips[requireClipIndex(track, rightClipId)]!;
     if (left.kind !== "clip" || right.kind !== "clip") throw new RangeError("El roll edit solo funciona entre clips");
+    if (clipSpeed(left) !== 1 || clipSpeed(right) !== 1) {
+      // Con velocidades distintas de 1, el redondeo de cada lado no
+      // garantiza que el corte siga exactamente pegado.
+      throw new RangeError("El roll edit solo funciona entre clips a velocidad normal");
+    }
     if (clipEndTicks(left) !== right.startTicks) throw new RangeError("Los clips no son contiguos");
     const newLeftOut = left.sourceOutTicks + deltaTicks;
     const newRightIn = right.sourceInTicks + deltaTicks;
@@ -605,12 +637,48 @@ export function detachClipAudio(
     volume: clip.volume,
     muted: false,
     ...(clip.volumeKeyframes ? { volumeKeyframes: clip.volumeKeyframes.map((k) => ({ ...k })) } : {}),
+    ...(clip.speed !== undefined && clip.speed !== 1 ? { speed: clip.speed } : {}),
   };
   const withAudio = insertClip(timeline, audioTrackId, audioClip);
   return updateTrack(withAudio, trackId, (t) => ({
     ...t,
     clips: t.clips.map((c) => (c.id === clipId ? { ...c, muted: true } : c)),
   }));
+}
+
+/**
+ * Cambia la velocidad de un clip (ver Clip.speed) sin moverlo de su
+ * inicio: su duración en la timeline pasa a (sourceOut − sourceIn) /
+ * speed. Los puntos de volumen se reescalan para seguir en el mismo
+ * momento del CONTENIDO. Lanza si el clip alargado se solaparía con el
+ * siguiente de su pista, o si la velocidad está fuera de
+ * [MIN_CLIP_SPEED, MAX_CLIP_SPEED].
+ */
+export function setClipSpeed(timeline: Timeline, trackId: string, clipId: string, speed: number): Timeline {
+  if (!Number.isFinite(speed) || speed < MIN_CLIP_SPEED || speed > MAX_CLIP_SPEED) {
+    throw new RangeError(`La velocidad tiene que estar entre ${MIN_CLIP_SPEED}× y ${MAX_CLIP_SPEED}×`);
+  }
+  return updateTrack(timeline, trackId, (track) => {
+    const index = requireClipIndex(track, clipId);
+    const clip = track.clips[index]!;
+    if (clip.kind !== "clip") throw new RangeError("Solo los clips tienen velocidad");
+    const { speed: _old, ...rest } = clip;
+    const updated: Clip = speed === 1 ? rest : { ...rest, speed };
+    const oldDuration = clipDurationTicks(clip);
+    const newDuration = clipDurationTicks(updated);
+    if (track.clips.some((other) => other.id !== clipId && clipsOverlap(other, updated))) {
+      throw new RangeError("Con esa velocidad el clip se solaparía con el siguiente: deja hueco detrás o recórtalo");
+    }
+    if (clip.volumeKeyframes && oldDuration > 0) {
+      updated.volumeKeyframes = clip.volumeKeyframes.map((k) => ({
+        ...k,
+        offsetTicks: Math.round((k.offsetTicks * newDuration) / oldDuration),
+      }));
+    }
+    const clips = [...track.clips];
+    clips[index] = updated;
+    return { ...track, clips };
+  });
 }
 
 /** Ganancia de audio (0-1, se recorta a ese rango) y silencio de un clip. */
@@ -1104,6 +1172,8 @@ export interface TransitionAudioCue {
   durationTicks: number;
   /** Rampa de ganancia lista para scheduleGain/playAudioSlice — offsetSeconds ya relativos al inicio de ESTE cue. */
   automation: VolumeAutomationPoint[];
+  /** Velocidad del clip vecino (ver Clip.speed): `durationTicks` es tiempo de timeline; de la fuente se consume durationTicks × playbackRate. */
+  playbackRate: number;
 }
 
 /**
@@ -1132,10 +1202,12 @@ export function transitionAudioCues(
     if (startOffsetTicks < fadeDuration) {
       const remainingTicks = fadeDuration - startOffsetTicks;
       const baseGain = effectiveClipVolume(from);
+      const rate = clipSpeed(from);
       cues.push({
         sourceId: from.sourceId,
-        sourceStartTicks: from.sourceOutTicks - fadeDuration + startOffsetTicks,
+        sourceStartTicks: from.sourceOutTicks - Math.round((fadeDuration - startOffsetTicks) * rate),
         durationTicks: remainingTicks,
+        playbackRate: rate,
         automation: [
           { offsetSeconds: 0, volume: baseGain * (1 - startOffsetTicks / fadeDuration) },
           { offsetSeconds: ticksToSeconds(remainingTicks), volume: 0 },
@@ -1149,10 +1221,12 @@ export function transitionAudioCues(
     if (startOffsetTicks < fadeDuration) {
       const remainingTicks = fadeDuration - startOffsetTicks;
       const baseGain = effectiveClipVolume(to);
+      const rate = clipSpeed(to);
       cues.push({
         sourceId: to.sourceId,
-        sourceStartTicks: to.sourceInTicks + startOffsetTicks,
+        sourceStartTicks: to.sourceInTicks + Math.round(startOffsetTicks * rate),
         durationTicks: remainingTicks,
+        playbackRate: rate,
         automation: [
           { offsetSeconds: 0, volume: baseGain * (startOffsetTicks / fadeDuration) },
           { offsetSeconds: ticksToSeconds(remainingTicks), volume: baseGain },
@@ -1168,9 +1242,12 @@ export function transitionAudioCues(
 export interface AudioSchedule {
   sourceId: string;
   sourceStartTicks: number;
+  /** Duración en la TIMELINE; de la fuente se consumen durationTicks × playbackRate. */
   durationTicks: number;
   startTicks: number;
   automation: VolumeAutomationPoint[];
+  /** Velocidad del clip (Clip.speed, 1 por defecto). */
+  playbackRate: number;
 }
 
 /**
@@ -1206,10 +1283,11 @@ export function allAudioSchedules(timeline: Timeline, fromTicks: number = 0): Au
         const skipTicks = Math.max(0, fromTicks - audioStartTicks);
         schedules.push({
           sourceId: clip.sourceId,
-          sourceStartTicks: clip.sourceInTicks + headCutTicks + skipTicks,
+          sourceStartTicks: timelineToSourceTicks(clip, audioStartTicks + skipTicks),
           durationTicks: playDurationTicks - skipTicks,
           startTicks: audioStartTicks + skipTicks,
           automation: volumeAutomationFrom(clip, headCutTicks + skipTicks),
+          playbackRate: clipSpeed(clip),
         });
       } else if (clip.kind === "transition") {
         if (clipEndTicks(clip) <= fromTicks) continue;
@@ -1221,6 +1299,7 @@ export function allAudioSchedules(timeline: Timeline, fromTicks: number = 0): Au
             durationTicks: cue.durationTicks,
             startTicks: Math.max(clip.startTicks, fromTicks),
             automation: cue.automation,
+            playbackRate: cue.playbackRate,
           });
         }
       }

@@ -168,6 +168,25 @@
               </div>
 
               <div class="field-group">
+                <span class="field-group-label">Velocidad</span>
+                <label
+                  >Velocidad del clip
+                  <select id="clip-speed">
+                    <option value="0.25">25 % (cámara lenta)</option>
+                    <option value="0.5">50 %</option>
+                    <option value="0.75">75 %</option>
+                    <option value="1" selected>100 % (normal)</option>
+                    <option value="1.25">125 %</option>
+                    <option value="1.5">150 %</option>
+                    <option value="2">200 %</option>
+                    <option value="3">300 %</option>
+                    <option value="4">400 %</option>
+                  </select>
+                </label>
+                <p class="hint-inline">El clip se alarga o acorta desde su inicio; el audio cambia de tono con la velocidad.</p>
+              </div>
+
+              <div class="field-group">
                 <span class="field-group-label">Audio del clip</span>
                 <label class="checkbox-row"><input id="clip-muted" type="checkbox" /> Silenciar (solo vídeo)</label>
                 <label class="checkbox-row"><input id="clip-video-hidden" type="checkbox" /> Ocultar vídeo (solo audio)</label>

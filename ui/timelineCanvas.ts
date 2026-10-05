@@ -542,7 +542,8 @@ export class TimelineCanvasView {
         if (h > 34) {
           ctx.font = `10.5px ${FONT}`;
           ctx.fillStyle = "rgba(255,255,255,0.75)";
-          const tag = clip.videoHidden ? " · solo audio" : "";
+          const speed = clip.kind === "clip" ? (clip.speed ?? 1) : 1;
+          const tag = `${speed !== 1 ? ` · ${Math.round(speed * 100)} %` : ""}${clip.videoHidden ? " · solo audio" : ""}`;
           ctx.fillText(ellipsize(ctx, `${ticksToSeconds(clipDurationTicks(clip)).toFixed(2)}s${tag}`, maxTextW), textX, y + h - 16);
         }
       }
@@ -679,7 +680,8 @@ export class TimelineCanvasView {
     const sourceDuration = source!.durationTicks || 1;
     const bucketCount = Math.max(1, Math.floor(peaks.length / 2));
     const fracStart = clip.sourceInTicks / sourceDuration;
-    const fracSpan = clipDurationTicks(clip) / sourceDuration;
+    // Tramo de FUENTE que cubre el clip (con velocidad ≠ 1 no es su duración en la timeline).
+    const fracSpan = (clip.sourceOutTicks - clip.sourceInTicks) / sourceDuration;
     const mid = y + h / 2;
     const half = h / 2 - 1;
     ctx.fillStyle = clip.muted ? p.textDim : WAVEFORM_COLOR;

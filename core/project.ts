@@ -161,6 +161,7 @@ interface RawClip {
   chromaKey?: ChromaKey;
   lut?: ClipLut;
   flagged?: boolean;
+  speed?: number;
 }
 
 /** Acepta gradings guardados antes del 2026-10-02 (sin exposición/temperatura/curvas...) — normalizeColorGrade rellena lo que falte. */
@@ -214,7 +215,8 @@ function isRawClip(value: unknown): value is RawClip {
     (v.colorGrade === undefined || isColorGrade(v.colorGrade)) &&
     (v.chromaKey === undefined || isChromaKey(v.chromaKey)) &&
     (v.lut === undefined || isClipLut(v.lut)) &&
-    (v.flagged === undefined || typeof v.flagged === "boolean")
+    (v.flagged === undefined || typeof v.flagged === "boolean") &&
+    (v.speed === undefined || (typeof v.speed === "number" && Number.isFinite(v.speed) && v.speed > 0))
   );
 }
 
@@ -257,6 +259,7 @@ function migrateClipsRipple(rawClips: RawClip[]): Clip[] {
       if (raw.chromaKey) normalized.chromaKey = raw.chromaKey;
       if (raw.lut) normalized.lut = raw.lut;
       if (raw.flagged) normalized.flagged = true;
+      if (raw.speed !== undefined && raw.speed !== 1) normalized.speed = raw.speed;
       clips.push(normalized);
     }
     cursor = startTicks + duration;

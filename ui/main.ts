@@ -12,8 +12,14 @@ import {
   moveClipToTrack,
   moveClipsBy,
   pasteClipCopy,
+  clipSpeed,
   detachClipAudio,
   duplicateClip,
+  MAX_CLIP_SPEED,
+  MIN_CLIP_SPEED,
+  setClipSpeed,
+  sourceToTimelineTicks,
+  timelineToSourceTicks,
   rollEdit,
   rollEditRange,
   removeClips,
@@ -164,6 +170,7 @@ const trimInInput = requireElement<HTMLInputElement>("#trim-in");
 const trimOutInput = requireElement<HTMLInputElement>("#trim-out");
 const applyTrimButton = requireElement<HTMLButtonElement>("#apply-trim");
 const clipMutedInput = requireElement<HTMLInputElement>("#clip-muted");
+const clipSpeedSelect = requireElement<HTMLSelectElement>("#clip-speed");
 const detachAudioButton = requireElement<HTMLButtonElement>("#detach-audio-button");
 const clipVideoHiddenInput = requireElement<HTMLInputElement>("#clip-video-hidden");
 const clipColorFilterSelect = requireElement<HTMLSelectElement>("#clip-color-filter");
@@ -445,6 +452,7 @@ function scheduleAllTrackAudio(fromTicks: number): void {
         ticksToSeconds(schedule.durationTicks),
         when,
         schedule.automation,
+        schedule.playbackRate,
       ),
     );
   }
@@ -593,6 +601,7 @@ function afterHistoryChange(): void {
     clipMutedInput.checked = found.clip.muted;
     clipVideoHiddenInput.checked = found.clip.videoHidden ?? false;
     clipColorFilterSelect.value = found.clip.colorFilter ?? "";
+    syncClipSpeedSelect(found.clip);
     syncGradePanel(found.clip); // el grading se guarda solo al soltar cada barra: deshacer tiene que devolver las barras a su sitio
   }
   void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
@@ -634,7 +643,7 @@ function timelineTicksForSourceFrame(sourceId: string, sourceTimeUs: number): nu
   if (!activeSegment || activeSegment.kind !== "clip" || activeSegment.clip.sourceId !== sourceId) return undefined;
   const clip = activeSegment.clip;
   const sourceTicks = secondsToTicks(sourceTimeUs / 1_000_000);
-  return clip.startTicks + Math.max(0, sourceTicks - clip.sourceInTicks);
+  return sourceToTimelineTicks(clip, Math.max(clip.sourceInTicks, sourceTicks));
 }
 
 /**
@@ -693,7 +702,7 @@ function getPlayer(sourceId: string): VideoPlayer {
         if (!activeSegment || activeSegment.kind !== "clip" || activeSegment.clip.sourceId !== sourceId) return; // fotograma tardío de un player ya no activo
         const clip = activeSegment.clip;
         const sourceTicks = secondsToTicks(sourceTimeUs / 1_000_000);
-        setPlayheadTicks(clip.startTicks + Math.max(0, sourceTicks - clip.sourceInTicks));
+        setPlayheadTicks(sourceToTimelineTicks(clip, Math.max(clip.sourceInTicks, sourceTicks)));
       },
       onEnded: () => {
         void handleClipEnded(sourceId);
@@ -760,11 +769,12 @@ async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): P
     previous?.kind === "clip" &&
     previous.clip.sourceId === clip.sourceId &&
     previous.clip.sourceOutTicks === clip.sourceInTicks &&
-    clipEndTicks(previous.clip) === clip.startTicks
+    clipEndTicks(previous.clip) === clip.startTicks &&
+    clipSpeed(previous.clip) === clipSpeed(clip)
   ) {
     activeSegment = { kind: "clip", trackId, clip };
     activeLook = lookForClip(clip, timeline?.luts);
-    player.play(Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000));
+    player.play(Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000), clipSpeed(clip));
     pauseButton.disabled = false;
     return;
   }
@@ -788,7 +798,7 @@ async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): P
     }
   }
 
-  const startUs = Math.round(ticksToSeconds(clip.sourceInTicks + effectiveOffsetTicks) * 1_000_000);
+  const startUs = Math.round(ticksToSeconds(timelineToSourceTicks(clip, clip.startTicks + effectiveOffsetTicks)) * 1_000_000);
   const endUs = Math.round(ticksToSeconds(clip.sourceOutTicks) * 1_000_000);
   activeSegment = { kind: "clip", trackId, clip };
   activeLook = lookForClip(clip, timeline?.luts);
@@ -798,7 +808,7 @@ async function playClipFrom(trackId: string, clip: Clip, offsetTicks: number): P
   // — no arranques la reproducción de un segmento que ya no es el activo.
   if (activeSegment?.kind !== "clip" || activeSegment.clip.id !== clip.id) return;
 
-  player.play(endUs);
+  player.play(endUs, clipSpeed(clip));
   pauseButton.disabled = false;
 }
 
@@ -1578,11 +1588,11 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
     const track = timeline.tracks.find((t) => t.id === trackId);
     const clip = track?.clips.find((c) => c.id === clipId);
     if (track && clip && clip.kind === "clip") {
-      const end = clip.startTicks + (clip.sourceOutTicks - clip.sourceInTicks);
+      const end = clipEndTicks(clip);
       const neighbor =
         handle === "right"
           ? track.clips.find((c) => c.kind === "clip" && c.startTicks === end)
-          : track.clips.find((c) => c.kind === "clip" && c.startTicks + (c.sourceOutTicks - c.sourceInTicks) === clip.startTicks);
+          : track.clips.find((c) => c.kind === "clip" && clipEndTicks(c) === clip.startTicks);
       if (neighbor) {
         if (handle === "right") beginRollDrag(event, trackId, clip.id, neighbor.id);
         else beginRollDrag(event, trackId, neighbor.id, clip.id);
@@ -1600,10 +1610,11 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
   const entry = sources.get(originalClip.sourceId);
   const sourceDurationTicks = entry?.sourceFile.durationTicks ?? originalClip.sourceOutTicks;
   const minDuration = frameDurationTicks(dragStartTimeline.outputFrameRate);
-  const clipDuration = originalClip.sourceOutTicks - originalClip.sourceInTicks;
+  const clipDuration = clipDurationTicks(originalClip);
+  const speed = clipSpeed(originalClip);
   const playheadSourceTicks =
     playheadTicks >= originalClip.startTicks && playheadTicks < originalClip.startTicks + clipDuration
-      ? originalClip.sourceInTicks + (playheadTicks - originalClip.startTicks)
+      ? timelineToSourceTicks(originalClip, playheadTicks)
       : undefined;
   const startClientX = event.clientX;
   const snapThresholdTicks = Math.max(1, secondsToTicks(SNAP_PIXELS / pixelsPerSecond));
@@ -1625,7 +1636,8 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
   }
 
   function onMove(moveEvent: PointerEvent): void {
-    const deltaTicks = secondsToTicks((moveEvent.clientX - startClientX) / pixelsPerSecond);
+    // En pantalla se arrastra tiempo de timeline; en la fuente son × velocidad.
+    const deltaTicks = Math.round(secondsToTicks((moveEvent.clientX - startClientX) / pixelsPerSecond) * speed);
     let appliedValue: number;
     try {
       if (handle === "left") {
@@ -1925,10 +1937,11 @@ function insertTransitionOnClip(
     status.textContent = "El clip es demasiado corto para insertar esa transición.";
     return undefined;
   }
-  const newOutTicks = clip.sourceOutTicks - durationTicks;
-  const transitionStart = clip.startTicks + (newOutTicks - clip.sourceInTicks);
+  // durationTicks es tiempo de timeline; en la fuente del clip, × su velocidad.
+  const newOutTicks = clip.sourceOutTicks - Math.round(durationTicks * clipSpeed(clip));
   const transitionId = `transition-${nextClipNumber++}`;
   let next = trimClipOut(timeline, trackId, clip.id, newOutTicks, minDuration);
+  const transitionStart = clipEndTicks(next.tracks.find((t) => t.id === trackId)!.clips.find((c) => c.id === clip.id)!);
   next = insertClip(next, trackId, createTransition(transitionId, transitionStart, durationTicks, transitionType));
   commitTimeline(next);
   refreshTimelineLayout();
@@ -2518,6 +2531,7 @@ function selectClipRef(trackId: string, clipId: string, additive: boolean = fals
   clipMutedInput.checked = clip.muted;
   clipVideoHiddenInput.checked = clip.videoHidden ?? false;
   clipColorFilterSelect.value = clip.colorFilter ?? "";
+  syncClipSpeedSelect(clip);
   syncGradePanel(clip);
   trimDetails.open = true; // al seleccionar un clip, se abre solo el compartimento donde se edita
   renderTimelineSelection();
@@ -3231,9 +3245,9 @@ function detachSelectedAudio(): void {
   const created: ClipRef[] = [];
   for (const { track, clip } of located) {
     const start = clip.startTicks;
-    const end = clip.startTicks + (clip.sourceOutTicks - clip.sourceInTicks);
+    const end = clipEndTicks(clip);
     let audioTrackId = next.tracks.find(
-      (t) => t.kind === "audio" && !t.clips.some((c) => c.startTicks < end && c.startTicks + (c.sourceOutTicks - c.sourceInTicks) > start),
+      (t) => t.kind === "audio" && !t.clips.some((c) => c.startTicks < end && clipEndTicks(c) > start),
     )?.id;
     if (!audioTrackId) {
       audioTrackId = `audio-${nextTrackNumber++}`;
@@ -3786,6 +3800,41 @@ function applyClipMuted(): void {
 }
 
 clipMutedInput.addEventListener("change", applyClipMuted);
+
+/** Refleja la velocidad del clip en el desplegable (añadiendo la opción si es un valor que no está en la lista, p.ej. de un proyecto editado a mano). */
+function syncClipSpeedSelect(clip: Clip): void {
+  const value = String(clipSpeed(clip));
+  if (![...clipSpeedSelect.options].some((option) => option.value === value)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = `${Math.round(clipSpeed(clip) * 100)} %`;
+    clipSpeedSelect.appendChild(option);
+  }
+  clipSpeedSelect.value = value;
+  clipSpeedSelect.disabled = clip.kind !== "clip";
+}
+
+/** Velocidad del clip seleccionado (mejora del 2026-10-05) — ver setClipSpeed en core/timeline.ts. */
+function applyClipSpeed(): void {
+  const found = findClipRef(selectedClip);
+  if (!timeline || !found || found.clip.kind !== "clip") return;
+  const speed = Number(clipSpeedSelect.value);
+  if (!(speed >= MIN_CLIP_SPEED && speed <= MAX_CLIP_SPEED)) return;
+  stopPlayback();
+  try {
+    commitTimeline(setClipSpeed(timeline, found.track.id, found.clip.id, speed));
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : String(error);
+    syncClipSpeedSelect(found.clip);
+    return;
+  }
+  refreshTimelineLayout();
+  const updated = findClipRef(selectedClip);
+  if (updated) void seekToTimelineTicks(Math.min(playheadTicks, Math.max(updated.clip.startTicks, clipEndTicks(updated.clip) - 1)));
+  status.textContent = speed === 1 ? "Velocidad normal." : `Velocidad: ${Math.round(speed * 100)} %.`;
+}
+
+clipSpeedSelect.addEventListener("change", applyClipSpeed);
 
 /** Opuesto de applyClipMuted, pero para el vídeo — ver doc de Clip.videoHidden en core/types.ts. */
 function applyClipVideoHidden(): void {

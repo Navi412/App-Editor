@@ -38,9 +38,17 @@ export function playAudioSlice(
   durationSeconds: number,
   when: number,
   gain: number | VolumeAutomationPoint[] = 1,
+  /**
+   * Velocidad del clip (Clip.speed). `durationSeconds` es tiempo REAL
+   * (de timeline): de la fuente se consume durationSeconds × playbackRate.
+   * Cambia también el tono, como cualquier cambio de velocidad sin
+   * estiramiento temporal.
+   */
+  playbackRate = 1,
 ): AudioPlaybackHandle {
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
+  source.playbackRate.value = playbackRate;
   const gainNode = audioContext.createGain();
   if (Array.isArray(gain)) {
     scheduleGain(gainNode.gain, gain, when);
@@ -50,7 +58,7 @@ export function playAudioSlice(
   source.connect(gainNode);
   gainNode.connect(destination);
   const safeOffset = Math.max(0, Math.min(offsetSeconds, buffer.duration));
-  const safeDuration = Math.max(0, Math.min(durationSeconds, buffer.duration - safeOffset));
+  const safeDuration = Math.max(0, Math.min(durationSeconds * playbackRate, buffer.duration - safeOffset));
   source.start(when, safeOffset, safeDuration);
   let stopped = false;
   return {

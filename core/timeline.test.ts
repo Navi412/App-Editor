@@ -26,6 +26,9 @@ import {
   effectiveClipVolume,
   rollEdit,
   rollEditRange,
+  setClipSpeed,
+  sourceToTimelineTicks,
+  timelineToSourceTicks,
   insertClip,
   isNeutralColorGrade,
   moveClipTo,
@@ -1294,5 +1297,67 @@ describe("detachClipAudio", () => {
     expect(() => detachClipAudio(once, trackId, "a", "aud", "x")).toThrow(RangeError);
     const blocked = insertClip(base, "aud", clip("ocupa", "s", 0, 0, 5));
     expect(() => detachClipAudio(blocked, trackId, "b", "aud", "x")).toThrow(RangeError);
+  });
+});
+
+describe("velocidad de clip (setClipSpeed)", () => {
+  it("a 2× el clip dura la mitad y cada instante de la timeline ve el doble de fuente", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const after = setClipSpeed(before, trackId, "a", 2);
+    const a = after.tracks[0]!.clips.find((c) => c.id === "a")!;
+    expect(clipDurationTicks(a)).toBe(secondsToTicks(1));
+    expect(timelineToSourceTicks(a, secondsToTicks(0.5))).toBe(secondsToTicks(1));
+    expect(sourceToTimelineTicks(a, secondsToTicks(1))).toBe(secondsToTicks(0.5));
+    expect(resolveActiveVideoPosition(after, secondsToTicks(0.75))!.sourceTimeTicks).toBe(secondsToTicks(1.5));
+  });
+
+  it("a 0,5× se alarga, y lanza si se solaparía con el siguiente", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    expect(() => setClipSpeed(before, trackId, "a", 0.5)).toThrow(RangeError);
+    const moved = moveClipTo(before, trackId, "b", secondsToTicks(10));
+    const slow = setClipSpeed(moved, trackId, "a", 0.5);
+    expect(clipDurationTicks(slow.tracks[0]!.clips.find((c) => c.id === "a")!)).toBe(secondsToTicks(4));
+  });
+
+  it("volver a 1× quita el campo, y rechaza velocidades fuera de rango", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const fast = setClipSpeed(before, trackId, "a", 2);
+    const normal = setClipSpeed(fast, trackId, "a", 1);
+    expect(normal.tracks[0]!.clips.find((c) => c.id === "a")!.speed).toBeUndefined();
+    expect(() => setClipSpeed(before, trackId, "a", 8)).toThrow(RangeError);
+    expect(() => setClipSpeed(before, trackId, "a", 0)).toThrow(RangeError);
+  });
+
+  it("cortar un clip acelerado deja los dos trozos pegados y cubriendo la misma fuente", () => {
+    const before = setClipSpeed(twoClipTimeline(), twoClipTimeline().tracks[0]!.id, "a", 2);
+    const trackId = before.tracks[0]!.id;
+    const after = splitClipAt(before, trackId, secondsToTicks(0.5), ["a1", "a2"]);
+    const [a1, a2] = after.tracks[0]!.clips;
+    expect(clipEndTicks(a1!)).toBe(a2!.startTicks);
+    expect(a1!.sourceOutTicks).toBe(secondsToTicks(1));
+    expect(a2!.sourceInTicks).toBe(secondsToTicks(1));
+    expect(a2!.speed).toBe(2);
+  });
+
+  it("el audio de un clip acelerado se programa con su playbackRate", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const after = setClipSpeed(before, trackId, "a", 2);
+    const schedule = allAudioSchedules(after, secondsToTicks(0.5)).find((s) => s.sourceId === "source-a")!;
+    expect(schedule.playbackRate).toBe(2);
+    expect(schedule.sourceStartTicks).toBe(secondsToTicks(1));
+    expect(schedule.durationTicks).toBe(secondsToTicks(0.5));
+  });
+
+  it("el roll edit se niega con clips a otra velocidad", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const moved = moveClipTo(before, trackId, "b", secondsToTicks(10));
+    const fast = setClipSpeed(moved, trackId, "a", 2);
+    const glued = moveClipTo(fast, trackId, "b", secondsToTicks(1));
+    expect(() => rollEdit(glued, trackId, "a", "b", secondsToTicks(0.1), 1, secondsToTicks(100))).toThrow(RangeError);
   });
 });

@@ -314,6 +314,7 @@ async function renderExportAudio(timeline: Timeline, getAudio: (sourceId: string
       ticksToSeconds(schedule.durationTicks),
       ticksToSeconds(schedule.startTicks),
       schedule.automation,
+      schedule.playbackRate,
     );
   }
 

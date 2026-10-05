@@ -12,7 +12,10 @@ import {
   moveClipToTrack,
   moveClipsBy,
   pasteClipCopy,
+  detachClipAudio,
   duplicateClip,
+  rollEdit,
+  rollEditRange,
   removeClips,
   slipClip,
   addLut,
@@ -161,6 +164,7 @@ const trimInInput = requireElement<HTMLInputElement>("#trim-in");
 const trimOutInput = requireElement<HTMLInputElement>("#trim-out");
 const applyTrimButton = requireElement<HTMLButtonElement>("#apply-trim");
 const clipMutedInput = requireElement<HTMLInputElement>("#clip-muted");
+const detachAudioButton = requireElement<HTMLButtonElement>("#detach-audio-button");
 const clipVideoHiddenInput = requireElement<HTMLInputElement>("#clip-video-hidden");
 const clipColorFilterSelect = requireElement<HTMLSelectElement>("#clip-color-filter");
 const outputControls = requireElement<HTMLFieldSetElement>("#output-controls");
@@ -1559,6 +1563,25 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
   if (!timeline) return;
   event.preventDefault();
 
+  // Ctrl+arrastre de un borde pegado a otro clip: roll edit (mueve el corte entre los dos).
+  if (event.ctrlKey || event.metaKey) {
+    const track = timeline.tracks.find((t) => t.id === trackId);
+    const clip = track?.clips.find((c) => c.id === clipId);
+    if (track && clip && clip.kind === "clip") {
+      const end = clip.startTicks + (clip.sourceOutTicks - clip.sourceInTicks);
+      const neighbor =
+        handle === "right"
+          ? track.clips.find((c) => c.kind === "clip" && c.startTicks === end)
+          : track.clips.find((c) => c.kind === "clip" && c.startTicks + (c.sourceOutTicks - c.sourceInTicks) === clip.startTicks);
+      if (neighbor) {
+        if (handle === "right") beginRollDrag(event, trackId, clip.id, neighbor.id);
+        else beginRollDrag(event, trackId, neighbor.id, clip.id);
+        return;
+      }
+      status.textContent = "Roll edit: el borde tiene que estar pegado a otro clip.";
+    }
+  }
+
   const dragStartTimeline = timeline;
   const maybeDragStartTrack = dragStartTimeline.tracks.find((t) => t.id === trackId);
   const maybeOriginalClip = maybeDragStartTrack?.clips.find((c) => c.id === clipId);
@@ -1632,6 +1655,56 @@ function beginTrimDrag(event: PointerEvent, trackId: string, clipId: string, han
       const updated = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
       if (updated && maybeDragStartTrack!.kind === "video") void seekToTimelineTicks(updated.startTicks);
       status.textContent = ripple ? "Recorte aplicado (ripple)." : "Recorte aplicado.";
+    }
+  }
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/**
+ * Roll edit (Ctrl+arrastre de un borde entre dos clips pegados, mejora
+ * del 2026-10-05): mueve el corte — el de la izquierda se alarga lo que
+ * el de la derecha se acorta. Imán al playhead. Un solo paso de
+ * historial al soltar. Ver rollEdit en core/timeline.ts.
+ */
+function beginRollDrag(event: PointerEvent, trackId: string, leftId: string, rightId: string): void {
+  if (!timeline) return;
+  const dragStartTimeline = timeline;
+  const track = dragStartTimeline.tracks.find((t) => t.id === trackId)!;
+  const left = track.clips.find((c) => c.id === leftId)!;
+  const right = track.clips.find((c) => c.id === rightId)!;
+  const minDuration = frameDurationTicks(dragStartTimeline.outputFrameRate);
+  const maxLeftOut = sources.get(left.sourceId)?.sourceFile.durationTicks ?? left.sourceOutTicks;
+  const [minDelta, maxDelta] = rollEditRange(left, right, minDuration, maxLeftOut);
+  const cutTicks = right.startTicks;
+  const startClientX = event.clientX;
+  const snapThresholdTicks = Math.max(1, secondsToTicks(SNAP_PIXELS / pixelsPerSecond));
+  selectClipRef(trackId, leftId);
+
+  function onMove(moveEvent: PointerEvent): void {
+    let delta = secondsToTicks((moveEvent.clientX - startClientX) / pixelsPerSecond);
+    if (snappingEnabled && Math.abs(cutTicks + delta - playheadTicks) <= snapThresholdTicks) delta = playheadTicks - cutTicks;
+    delta = Math.max(minDelta, Math.min(maxDelta, delta));
+    try {
+      timeline = rollEdit(dragStartTimeline, trackId, leftId, rightId, delta, minDuration, maxLeftOut);
+    } catch {
+      return;
+    }
+    requestTimelineDraw();
+    showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, `Roll: corte en ${formatRulerTime(ticksToSeconds(cutTicks + delta))}`);
+  }
+
+  function onUp(): void {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    hideFloatingTooltip();
+    if (timeline && timeline !== dragStartTimeline) {
+      pushHistory(snapshotWithTimeline(dragStartTimeline));
+      refreshTimelineLayout();
+      const cut = timeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === rightId)?.startTicks;
+      if (cut !== undefined && track.kind === "video") void seekToTimelineTicks(cut);
+      status.textContent = "Roll edit aplicado.";
     }
   }
 
@@ -3128,6 +3201,46 @@ function duplicateSelectedClips(): void {
   status.textContent = copies.length === 1 ? "Clip duplicado." : `${copies.length} clips duplicados.`;
 }
 
+/**
+ * "Separar audio" (mejora del 2026-10-05): el audio de cada clip de
+ * vídeo seleccionado pasa a un clip propio en una pista de audio, en la
+ * misma posición, y el original se silencia (detachClipAudio). Se usa la
+ * primera pista de audio con ese hueco libre, o una nueva.
+ */
+function detachSelectedAudio(): void {
+  if (!timeline) return;
+  const located = selectedClipLocations().filter(
+    ({ track, clip }) => track.kind === "video" && clip.kind === "clip" && !clip.muted && !!sources.get(clip.sourceId)?.audio,
+  );
+  if (located.length === 0) {
+    status.textContent = "Selecciona un clip de vídeo con audio (que no esté silenciado).";
+    return;
+  }
+  stopPlayback();
+  let next = timeline;
+  const created: ClipRef[] = [];
+  for (const { track, clip } of located) {
+    const start = clip.startTicks;
+    const end = clip.startTicks + (clip.sourceOutTicks - clip.sourceInTicks);
+    let audioTrackId = next.tracks.find(
+      (t) => t.kind === "audio" && !t.clips.some((c) => c.startTicks < end && c.startTicks + (c.sourceOutTicks - c.sourceInTicks) > start),
+    )?.id;
+    if (!audioTrackId) {
+      audioTrackId = `audio-${nextTrackNumber++}`;
+      next = addTrack(next, audioTrackId, "audio");
+    }
+    const newId = `clip-${nextClipNumber++}`;
+    next = detachClipAudio(next, track.id, clip.id, audioTrackId, newId);
+    created.push({ trackId: audioTrackId, clipId: newId });
+  }
+  commitTimeline(next);
+  refreshTimelineLayout();
+  selectClipRef(created[0]!.trackId, created[0]!.clipId);
+  status.textContent = created.length === 1 ? "Audio separado a una pista de audio." : `Audio de ${created.length} clips separado.`;
+}
+
+detachAudioButton.addEventListener("click", detachSelectedAudio);
+
 /** Ctrl+A: selecciona todos los clips (no transiciones) de todas las pistas. */
 function selectAllClips(): void {
   if (!timeline) return;
@@ -4315,6 +4428,7 @@ const MENU_ACTIONS: Record<string, () => void> = {
   "delete-clip": () => clickIfEnabled(deleteClipButton),
   "ripple-delete": () => deleteSelectedClips(true),
   "duplicate-clips": duplicateSelectedClips,
+  "detach-audio": detachSelectedAudio,
   "copy-clips": () => void copySelectedClips(),
   "paste-clips": pasteClipboard,
   "select-all-clips": selectAllClips,
@@ -4387,6 +4501,7 @@ const APP_MENU: { group: string; items: { label: string; action: string }[] }[] 
       { label: "Eliminar clip(s) seleccionado(s) (Supr)", action: "delete-clip" },
       { label: "Eliminar cerrando el hueco (Mayús+Supr)", action: "ripple-delete" },
       { label: "Duplicar clip(s) (Ctrl+D)", action: "duplicate-clips" },
+      { label: "Separar audio del clip", action: "detach-audio" },
       { label: "Copiar clip(s) (Ctrl+C)", action: "copy-clips" },
       { label: "Pegar en el playhead (Ctrl+V)", action: "paste-clips" },
       { label: "Seleccionar todos los clips (Ctrl+A)", action: "select-all-clips" },

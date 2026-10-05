@@ -22,7 +22,10 @@ import {
   clipEndTicks,
   compressorParamsFromAmount,
   createTransition,
+  detachClipAudio,
   effectiveClipVolume,
+  rollEdit,
+  rollEditRange,
   insertClip,
   isNeutralColorGrade,
   moveClipTo,
@@ -1223,5 +1226,73 @@ describe("LUTs del proyecto", () => {
     expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, temperature: -0.2 })).toBe(false);
     const curves = { master: [{ x: 0, y: 0.1 }, { x: 1, y: 1 }], r: [], g: [], b: [] };
     expect(isNeutralColorGrade({ ...NEUTRAL_COLOR_GRADE, curves })).toBe(false);
+  });
+});
+
+describe("rollEdit", () => {
+  const min = secondsToTicks(0.1);
+  const big = secondsToTicks(100);
+  it("mueve el corte entre dos clips contiguos sin abrir hueco ni cambiar la duración total", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const after = rollEdit(before, trackId, "a", "b", secondsToTicks(0.5), min, big);
+    const [a, b] = after.tracks[0]!.clips;
+    expect(clipEndTicks(a!)).toBe(b!.startTicks);
+    expect(b!.startTicks).toBe(secondsToTicks(2.5));
+    expect(a!.sourceOutTicks).toBe(secondsToTicks(2.5));
+    expect(b!.sourceInTicks).toBe(secondsToTicks(5.5));
+    expect(timelineDurationTicks(after)).toBe(timelineDurationTicks(before));
+  });
+
+  it("también hacia atrás, y respeta los límites", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const after = rollEdit(before, trackId, "a", "b", -secondsToTicks(1), min, big);
+    expect(after.tracks[0]!.clips[1]!.startTicks).toBe(secondsToTicks(1));
+    expect(() => rollEdit(before, trackId, "a", "b", -secondsToTicks(2), min, big)).toThrow(RangeError);
+    expect(() => rollEdit(before, trackId, "a", "b", secondsToTicks(0.5), min, secondsToTicks(2.2))).toThrow(RangeError);
+  });
+
+  it("rollEditRange da los límites que acepta rollEdit", () => {
+    const before = twoClipTimeline();
+    const [a, b] = before.tracks[0]!.clips;
+    const [lo, hi] = rollEditRange(a!, b!, min, big);
+    expect(lo).toBe(-secondsToTicks(2) + min);
+    expect(hi).toBe(secondsToTicks(3) - min);
+    const trackId = before.tracks[0]!.id;
+    expect(() => rollEdit(before, trackId, "a", "b", lo, min, big)).not.toThrow();
+    expect(() => rollEdit(before, trackId, "a", "b", hi, min, big)).not.toThrow();
+  });
+
+  it("lanza si los clips no son contiguos", () => {
+    const before = twoClipTimeline();
+    const trackId = before.tracks[0]!.id;
+    const gapped = moveClipTo(before, trackId, "b", secondsToTicks(3));
+    expect(() => rollEdit(gapped, trackId, "a", "b", secondsToTicks(0.1), min, big)).toThrow(RangeError);
+  });
+});
+
+describe("detachClipAudio", () => {
+  it("copia el audio a la pista de audio en la misma posición y silencia el original", () => {
+    const base = addTrack(twoClipTimeline(), "aud", "audio");
+    const trackId = base.tracks[0]!.id;
+    const withKeys = addVolumeKeyframe(base, trackId, "b", 0, 0.5);
+    const after = detachClipAudio(withKeys, trackId, "b", "aud", "b-audio");
+    const original = after.tracks[0]!.clips.find((c) => c.id === "b")!;
+    const audio = after.tracks.find((t) => t.id === "aud")!.clips[0]!;
+    expect(original.muted).toBe(true);
+    expect(audio).toMatchObject({ id: "b-audio", sourceId: original.sourceId, startTicks: original.startTicks, muted: false });
+    expect(audio.sourceInTicks).toBe(original.sourceInTicks);
+    expect(audio.sourceOutTicks).toBe(original.sourceOutTicks);
+    expect(audio.volumeKeyframes).toEqual(original.volumeKeyframes);
+  });
+
+  it("lanza si el hueco de la pista de audio está ocupado o el clip ya estaba silenciado", () => {
+    const base = addTrack(twoClipTimeline(), "aud", "audio");
+    const trackId = base.tracks[0]!.id;
+    const once = detachClipAudio(base, trackId, "a", "aud", "a-audio");
+    expect(() => detachClipAudio(once, trackId, "a", "aud", "x")).toThrow(RangeError);
+    const blocked = insertClip(base, "aud", clip("ocupa", "s", 0, 0, 5));
+    expect(() => detachClipAudio(blocked, trackId, "b", "aud", "x")).toThrow(RangeError);
   });
 });

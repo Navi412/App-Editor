@@ -212,11 +212,11 @@ separado porque son independientes entre sí:
   solo-adelante, ver `media/frameSeeker.ts`/`createForwardFrameSeeker`
   y DESIGN.md §3) — retrocede un fotograma por pulsación (`stepFrame`),
   apoyándose en la repetición de tecla nativa del SO mientras se
-  mantiene pulsada, igual que ya hacía `ArrowLeft`. Deliberadamente
-  fuera de esta ampliación: roll edit (mover a la vez el límite entre
-  dos clips adyacentes) — no encaja con que `startTicks` nunca se toque
-  al recortar (ver más arriba), forzarlo habría producido una función
-  confusa en vez de una herramienta real.
+  mantiene pulsada, igual que ya hacía `ArrowLeft`. El roll edit quedó
+  fuera de esta ampliación y se añadió después, el 2026-10-05 (ver
+  "Mejoras del 2026-10-05"), como gesto aparte (Ctrl+arrastre) que sí
+  mueve el `startTicks` del clip derecho: el recorte normal sigue sin
+  tocarlo.
 
 - **Grading real (WebGL) y croma.** Independiente y ADITIVO respecto a
   `colorFilter` (los 6 presets CSS de siempre, sin cambios) — un clip
@@ -438,12 +438,21 @@ mientras estaba fuera; cada una va en su propio commit):
   archivo para un solo hueco, lo acepta aunque el nombre no coincida).
   `applyPendingProject` recibe `sourceId → File`; si la duración del
   archivo reenlazado no cuadra con la guardada (>0,5 s), lo avisa.
+- **Roll edit** (quitado de "fuera de alcance"): Ctrl+arrastre del borde
+  entre dos clips pegados de la misma pista mueve el corte —
+  `rollEdit`/`rollEditRange` en `core/timeline.ts`, `beginRollDrag` en
+  la UI—, con imán al playhead.
+- **Separar audio** (`detachClipAudio`; botón en el inspector y en
+  Editar del menú): copia el audio de un clip de vídeo a una pista de
+  audio (misma posición, volumen y puntos de volumen) y silencia el
+  original. Usa la primera pista de audio con ese hueco libre, o crea
+  una.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**
 cambios de velocidad de reproducción de un CLIP (retiming/slow-motion
 — distinto del shuttle J/K/L de arriba, que es solo transporte de
-edición y no toca ningún dato del proyecto), roll edit, compositing
+edición y no toca ningún dato del proyecto), compositing
 tipo Fusion (keying con tracking/despill, máscaras, nodos), soporte de
 códecs RAW de cámara o más allá de lo que WebCodecs ya decodifique de
 forma nativa.

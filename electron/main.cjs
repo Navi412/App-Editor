@@ -61,6 +61,7 @@ function buildAppMenu() {
         // Sin acelerador nativo: Ctrl+D/C/V/A ya los captura el keydown del
         // renderer (ver CLAUDE.md, "Menú de aplicación") — aquí solo la pista.
         { label: "Duplicar clip(s) (Ctrl+D)", click: () => sendMenuAction("duplicate-clips") },
+        { label: "Separar audio del clip", click: () => sendMenuAction("detach-audio") },
         { label: "Copiar clip(s) (Ctrl+C)", click: () => sendMenuAction("copy-clips") },
         { label: "Pegar en el playhead (Ctrl+V)", click: () => sendMenuAction("paste-clips") },
         { label: "Seleccionar todos los clips (Ctrl+A)", click: () => sendMenuAction("select-all-clips") },

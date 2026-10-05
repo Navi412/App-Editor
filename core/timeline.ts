@@ -525,6 +525,94 @@ export function trimClipOutRipple(
   });
 }
 
+/**
+ * Roll edit: mueve el corte entre dos clips CONTIGUOS de la misma pista
+ * (el final de `leftClipId` coincide exactamente con el inicio de
+ * `rightClipId`) — el izquierdo se alarga lo que el derecho se acorta y
+ * viceversa, así que ni se abre hueco ni cambia la duración total.
+ * Mejora pedida el 2026-10-05 (antes, fuera de alcance). A diferencia de
+ * trimClipIn/Out, SÍ mueve el `startTicks` del derecho: es la única
+ * forma de mantener el corte pegado. `maxLeftSourceOutTicks` es la
+ * duración de la fuente del clip izquierdo (/core no conoce las
+ * fuentes). Lanza si los clips no son contiguos, alguno quedaría por
+ * debajo de `minDurationTicks` o se saldría de su fuente.
+ */
+export function rollEdit(
+  timeline: Timeline,
+  trackId: string,
+  leftClipId: string,
+  rightClipId: string,
+  deltaTicks: number,
+  minDurationTicks: number,
+  maxLeftSourceOutTicks: number,
+): Timeline {
+  return updateTrack(timeline, trackId, (track) => {
+    const left = track.clips[requireClipIndex(track, leftClipId)]!;
+    const right = track.clips[requireClipIndex(track, rightClipId)]!;
+    if (left.kind !== "clip" || right.kind !== "clip") throw new RangeError("El roll edit solo funciona entre clips");
+    if (clipEndTicks(left) !== right.startTicks) throw new RangeError("Los clips no son contiguos");
+    const newLeftOut = left.sourceOutTicks + deltaTicks;
+    const newRightIn = right.sourceInTicks + deltaTicks;
+    if (newLeftOut - left.sourceInTicks < minDurationTicks || right.sourceOutTicks - newRightIn < minDurationTicks) {
+      throw new RangeError("El roll edit dejaría un clip por debajo de la duración mínima");
+    }
+    if (newLeftOut > maxLeftSourceOutTicks || newRightIn < 0) {
+      throw new RangeError("El roll edit se saldría del archivo de origen");
+    }
+    const clips = track.clips.map((c) => {
+      if (c.id === leftClipId) return { ...c, sourceOutTicks: newLeftOut };
+      if (c.id === rightClipId) return { ...c, sourceInTicks: newRightIn, startTicks: c.startTicks + deltaTicks };
+      return c;
+    });
+    return { ...track, clips };
+  });
+}
+
+/** Límites [mínimo, máximo] del desplazamiento de un roll edit entre dos clips contiguos (ver rollEdit). */
+export function rollEditRange(left: Clip, right: Clip, minDurationTicks: number, maxLeftSourceOutTicks: number): [number, number] {
+  const min = Math.max(minDurationTicks - (left.sourceOutTicks - left.sourceInTicks), -right.sourceInTicks);
+  const max = Math.min(right.sourceOutTicks - right.sourceInTicks - minDurationTicks, maxLeftSourceOutTicks - left.sourceOutTicks);
+  return [min, max];
+}
+
+/**
+ * "Separar audio": copia el audio de un clip de vídeo a la pista de
+ * audio `audioTrackId` como clip propio (mismo rango, misma posición,
+ * mismo volumen y puntos de volumen) y silencia el original — a partir
+ * de ahí se mueven, recortan y ajustan por separado. Mejora pedida el
+ * 2026-10-05. Lanza si el hueco de la pista de audio no está libre.
+ */
+export function detachClipAudio(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  audioTrackId: string,
+  newClipId: string,
+): Timeline {
+  const track = timeline.tracks[requireTrackIndex(timeline, trackId)]!;
+  const clip = track.clips[requireClipIndex(track, clipId)]!;
+  const audioTrack = timeline.tracks[requireTrackIndex(timeline, audioTrackId)]!;
+  if (track.kind !== "video" || clip.kind !== "clip") throw new RangeError("Solo se puede separar el audio de un clip de vídeo");
+  if (audioTrack.kind !== "audio") throw new RangeError("El destino tiene que ser una pista de audio");
+  if (clip.muted) throw new RangeError("El clip ya está silenciado (¿audio ya separado?)");
+  const audioClip: Clip = {
+    id: newClipId,
+    kind: "clip",
+    sourceId: clip.sourceId,
+    startTicks: clip.startTicks,
+    sourceInTicks: clip.sourceInTicks,
+    sourceOutTicks: clip.sourceOutTicks,
+    volume: clip.volume,
+    muted: false,
+    ...(clip.volumeKeyframes ? { volumeKeyframes: clip.volumeKeyframes.map((k) => ({ ...k })) } : {}),
+  };
+  const withAudio = insertClip(timeline, audioTrackId, audioClip);
+  return updateTrack(withAudio, trackId, (t) => ({
+    ...t,
+    clips: t.clips.map((c) => (c.id === clipId ? { ...c, muted: true } : c)),
+  }));
+}
+
 /** Ganancia de audio (0-1, se recorta a ese rango) y silencio de un clip. */
 export function setClipAudio(
   timeline: Timeline,

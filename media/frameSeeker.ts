@@ -30,7 +30,11 @@ export interface FrameSeeker {
  */
 const LOOKAHEAD_SAMPLES = 6;
 
-export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
+export function createForwardFrameSeeker(
+  demuxed: DemuxedTrack,
+  /** Por defecto "prefer-software" (ver abajo); los proxies, que recorren la fuente entera, piden hardware. */
+  preferredAcceleration: HardwareAcceleration = "prefer-software",
+): FrameSeeker {
   const { videoTrack, samples } = demuxed;
   const firstSample = samples[0];
   if (!firstSample) {
@@ -85,7 +89,7 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
     // esperar (o competir por) una sesión de hardware ya ocupada.
     // Excepción: HEVC. Chromium no trae decodificador HEVC por software
     // (solo el de la GPU/SO), así que forzarlo haría fallar el configure.
-    hardwareAcceleration: isHevcCodec(videoTrack.codec) ? "no-preference" : "prefer-software",
+    hardwareAcceleration: isHevcCodec(videoTrack.codec) && preferredAcceleration === "prefer-software" ? "no-preference" : preferredAcceleration,
   });
 
   let nextIndex = 0;

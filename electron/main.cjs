@@ -88,6 +88,7 @@ function buildAppMenu() {
         // Ctrl+Mayús+D: combo que el keydown del renderer no captura (ver
         // CLAUDE.md, "Menú de aplicación"), así no se dispara dos veces.
         { label: "Modo oscuro / claro", accelerator: "CmdOrCtrl+Shift+D", click: () => sendMenuAction("toggle-theme") },
+        { label: "Activar / desactivar proxies de edición", click: () => sendMenuAction("toggle-proxies") },
         { type: "separator" },
         { role: "togglefullscreen", label: "Pantalla completa" },
         { role: "toggleDevTools", label: "Herramientas de desarrollo" },

@@ -474,6 +474,21 @@ mientras estaba fuera; cada una va en su propio commit):
   se niega entre clips a velocidad ≠ 1 (el redondeo no garantiza que
   el corte siga pegado). Desplegable "Velocidad" en el inspector; la
   timeline muestra "· 200 %" en el clip.
+- **Proxies de edición** (`media/proxy.ts`). Las fuentes pesadas
+  (`shouldCreateProxy`: más de 1080p, o 1080p en AV1/HEVC/VP9) se
+  recodifican en segundo plano, de una en una (cola en `ui/main.ts`), a
+  H.264 de 540p con un keyframe cada 0,5 s. Viven en memoria (~19 MB
+  por minuto; no se proxifican fuentes de más de 30 min). Mismos
+  timestamps que la fuente, así que el player los usa tal cual:
+  `getPlayer` crea el player con el proxy en cuanto está listo, pero
+  nunca cambia el del clip activo. **La exportación usa siempre el
+  original.** El bin muestra el progreso y Ver › "Activar / desactivar
+  proxies" lo controla (`appVideo.proxies` en localStorage, activado
+  por defecto). Medido con una grabación de OBS (AV1 1440p60, 52 s): el
+  proxy tarda ~11 s en generarse con decodificación por hardware
+  (`createForwardFrameSeeker(…, "prefer-hardware")`; por software eran
+  90 s) y el salto medio del player baja de ~160 ms a ~10 ms. No se
+  guardan en disco: se regeneran en cada sesión.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**

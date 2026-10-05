@@ -91,6 +91,7 @@ import { createVideoPlayer, type VideoPlayer } from "../media/player";
 import { drawFrameFit, lookForClip, type FrameLook } from "../media/render";
 import { checkDecodable, decodeAllSamples, VIDEO_FILE_ACCEPT, type DemuxedTrack } from "../media/samples";
 import { toSourceFile } from "../media/sourceFile";
+import { createProxy, proxyBytes, shouldCreateProxy } from "../media/proxy";
 import { drawTextOverlays } from "../media/textOverlayRender";
 import {
   captureTransitionBoundaryFrames,
@@ -312,6 +313,12 @@ interface SourceEntry {
   sourceFile: SourceFile;
   /** Ausente en las fuentes de solo audio (`sourceFile.kind === "audio"`: mp3/wav importados), que no tienen vídeo que decodificar. */
   demuxed?: DemuxedTrack;
+  /** Proxy de edición (media/proxy.ts): copia ligera solo para el preview. La exportación usa siempre `demuxed`. */
+  proxy?: DemuxedTrack;
+  /** Texto de estado del proxy para el bin ("proxy 45 %", "proxy listo"...). */
+  proxyStatus?: string;
+  /** Con qué está hecho `player` ahora: para cambiarlo cuando el proxy esté listo (o se desactiven). */
+  playerUsesProxy?: boolean;
   fileName: string;
   /** Ruta absoluta real del archivo — solo disponible dentro de Electron (ver ui/electronBridge.ts), capturada con getPathForFile en cuanto se obtiene el File. Permite reabrir el proyecto sin volver a pedir el archivo si sigue en el mismo sitio. */
   filePath?: string;
@@ -684,9 +691,19 @@ function getPlayer(sourceId: string): VideoPlayer {
   if (!entry) throw new Error(`Fuente no encontrada: ${sourceId}`);
   touchPlayerPool(sourceId);
   if (!entry.demuxed) throw new Error(`${entry.fileName} es solo de audio: no tiene vídeo que mostrar`);
+  // Proxy listo (o recién desactivado) y el player no es de ese tipo: se
+  // rehace — pero nunca a mitad del clip que se está reproduciendo/viendo,
+  // para no cortar la continuidad (p.ej. tras un corte, mismo archivo).
+  const wantProxy = proxiesEnabled && !!entry.proxy;
+  const isActiveSource = activeSegment?.kind === "clip" && activeSegment.clip.sourceId === sourceId;
+  if (entry.player && entry.playerUsesProxy !== wantProxy && !isActiveSource) {
+    entry.player.destroy();
+    delete entry.player;
+  }
   if (!entry.player) {
     evictPlayerPoolIfNeeded(sourceId);
-    entry.player = createVideoPlayer(entry.demuxed, {
+    entry.playerUsesProxy = wantProxy;
+    entry.player = createVideoPlayer(wantProxy ? entry.proxy! : entry.demuxed, {
       onFrame: (frame) => {
         if (!timeline) return;
         drawFrameFit(ctx, frame, timeline.outputResolution, activeLook, previewGradeRenderer);
@@ -3599,6 +3616,7 @@ async function addClipFromFile(file: File): Promise<void> {
     const currentTimeline = requireTimeline();
     const newTrackId = topmostVideoTrackId(currentTimeline)!;
     afterMediaFileAdded(file);
+    enqueueProxy(sourceId);
 
     selectClipRef(newTrackId, clip.id);
     const placed = currentTimeline.tracks.find((t) => t.id === newTrackId)!.clips.find((c) => c.id === clip.id)!;
@@ -3616,6 +3634,96 @@ fileInput.addEventListener("change", () => {
   if (!file) return;
   void addClipFromFile(file);
 });
+
+// --- Proxies de edición — mejora pedida el 2026-10-05 (ver media/proxy.ts) ---
+// Las fuentes pesadas se recodifican en segundo plano, de una en una, a
+// un proxy ligero que usa solo el preview. Activado por defecto; se
+// recuerda por equipo (localStorage), como el tema.
+
+const PROXIES_KEY = "appVideo.proxies";
+let proxiesEnabled = (() => {
+  try {
+    return localStorage.getItem(PROXIES_KEY) !== "off";
+  } catch {
+    return true;
+  }
+})();
+const proxyQueue: string[] = [];
+let proxyJob: { sourceId: string; abort: AbortController } | undefined;
+
+function enqueueProxy(sourceId: string): void {
+  const entry = sources.get(sourceId);
+  if (!proxiesEnabled || !entry?.demuxed || entry.proxy || !shouldCreateProxy(entry.demuxed)) return;
+  if (proxyQueue.includes(sourceId) || proxyJob?.sourceId === sourceId) return;
+  proxyQueue.push(sourceId);
+  entry.proxyStatus = "proxy en cola";
+  void runProxyQueue();
+}
+
+async function runProxyQueue(): Promise<void> {
+  if (proxyJob) return;
+  const sourceId = proxyQueue.shift();
+  if (sourceId === undefined) return;
+  const entry = sources.get(sourceId);
+  if (!entry?.demuxed || !proxiesEnabled) {
+    void runProxyQueue();
+    return;
+  }
+  const abort = new AbortController();
+  proxyJob = { sourceId, abort };
+  let lastShown = -1;
+  try {
+    const proxy = await createProxy(entry.demuxed, {
+      signal: abort.signal,
+      onProgress: (done, total) => {
+        const percent = Math.floor((done / total) * 100);
+        if (percent === lastShown) return;
+        lastShown = percent;
+        entry.proxyStatus = `proxy ${percent} %`;
+        renderMediaBin();
+      },
+    });
+    // La fuente pudo quitarse (proyecto nuevo) mientras se generaba.
+    if (sources.get(sourceId) === entry && !abort.signal.aborted) {
+      entry.proxy = proxy;
+      entry.proxyStatus = `proxy listo (${Math.round(proxyBytes(proxy) / 1_000_000)} MB)`;
+      status.textContent = `Proxy de ${entry.fileName} listo: el preview irá más fluido.`;
+    }
+  } catch (error) {
+    if (!abort.signal.aborted) {
+      console.warn(`No se pudo generar el proxy de ${entry.fileName}:`, error);
+      entry.proxyStatus = "sin proxy";
+    }
+  } finally {
+    proxyJob = undefined;
+    renderMediaBin();
+    void runProxyQueue();
+  }
+}
+
+/** Para todo lo pendiente (p.ej. al abrir otro proyecto). Los proxies ya hechos se quedan con su fuente. */
+function cancelProxyJobs(): void {
+  proxyQueue.length = 0;
+  proxyJob?.abort.abort();
+}
+
+function setProxiesEnabled(enabled: boolean): void {
+  proxiesEnabled = enabled;
+  try {
+    localStorage.setItem(PROXIES_KEY, enabled ? "on" : "off");
+  } catch {
+    /* almacenamiento bloqueado: vale para esta sesión */
+  }
+  if (enabled) {
+    for (const id of sources.keys()) enqueueProxy(id);
+  } else {
+    cancelProxyJobs();
+  }
+  renderMediaBin();
+  status.textContent = enabled
+    ? "Proxies de edición activados: los vídeos pesados se preparan en segundo plano."
+    : "Proxies de edición desactivados: el preview usa los archivos originales.";
+}
 
 /**
  * Bin de medios — pedido explícito del 2026-08-29: antes, reutilizar un
@@ -3645,7 +3753,7 @@ function renderMediaBin(): void {
     name.title = entry.fileName;
     const meta = document.createElement("span");
     meta.className = "media-bin-meta";
-    meta.textContent = `${ticksToSeconds(entry.sourceFile.durationTicks).toFixed(1)}s${entry.sourceFile.width ? ` · ${entry.sourceFile.width}x${entry.sourceFile.height}` : ""}`;
+    meta.textContent = `${ticksToSeconds(entry.sourceFile.durationTicks).toFixed(1)}s${entry.sourceFile.width ? ` · ${entry.sourceFile.width}x${entry.sourceFile.height}` : ""}${entry.proxyStatus && proxiesEnabled ? ` · ${entry.proxyStatus}` : ""}`;
     info.append(name, meta);
 
     const addButton = document.createElement("button");
@@ -4501,6 +4609,7 @@ const MENU_ACTIONS: Record<string, () => void> = {
   "add-audio-track": () => clickIfEnabled(addAudioTrackButton),
   "show-shortcuts": () => shortcutsModal.showModal(),
   "toggle-theme": () => themeToggleButton.click(),
+  "toggle-proxies": () => setProxiesEnabled(!proxiesEnabled),
 };
 
 function clickIfEnabled(button: HTMLButtonElement): void {
@@ -4576,6 +4685,7 @@ const APP_MENU: { group: string; items: { label: string; action: string }[] }[] 
       { label: "Ajustar la timeline a la ventana", action: "zoom-fit" },
       { label: "Alternar zoom del preview", action: "toggle-preview-zoom" },
       { label: "Modo oscuro / claro", action: "toggle-theme" },
+      { label: "Activar / desactivar proxies de edición", action: "toggle-proxies" },
       { label: "Atajos de teclado", action: "show-shortcuts" },
     ],
   },
@@ -5307,10 +5417,12 @@ async function applyPendingProject(project: ProjectFile, manualById: Map<string,
     return;
   }
 
+  cancelProxyJobs();
   for (const entry of sources.values()) entry.player?.destroy();
   sources.clear();
   playerPoolOrder.length = 0;
   for (const [id, entry] of newSources) sources.set(id, entry);
+  for (const id of newSources.keys()) enqueueProxy(id);
   clearTransitionFrameCache();
 
   timeline = {

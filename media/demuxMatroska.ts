@@ -1,5 +1,6 @@
 import { avcCodecFromAvcC, av1CodecFromAv1C, hevcCodecFromHvcC, vp9CodecFromFrame } from "./codecStrings";
 import type { FrameRate } from "../core/time";
+import { SampleDataLoader, type ByteSource } from "./sampleData";
 import type { DemuxedSample, DemuxedTrack } from "./samples";
 import { snapFrameRate } from "./sourceFile";
 
@@ -224,7 +225,9 @@ interface RawBlock {
   /** Timestamp en unidades de TimecodeScale (cluster + relativo del bloque). */
   timecode: number;
   key: boolean;
-  data: Uint8Array;
+  /** Posición absoluta del fotograma en el archivo, y su tamaño: los bytes los lee el loader cuando hacen falta. */
+  offset: number;
+  size: number;
   /** Duración explícita (BlockGroup/BlockDuration), en unidades de TimecodeScale. */
   duration?: number;
 }
@@ -244,15 +247,50 @@ function parseBlock(
   return { track, relativeTimecode, flags: bytes[tcPos + 2]!, payloadStart: tcPos + 3 };
 }
 
-export function demuxMatroska(bytes: Uint8Array): DemuxedTrack {
-  const ebml = readElementHeader(bytes, 0);
+/** Lecturas del archivo por tramos de este tamaño mientras se recorre (no se guarda nada de ellos salvo posiciones). */
+const WINDOW_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Ventana deslizante sobre el archivo: el recorrido de Matroska es
+ * secuencial, así que se lee a trozos de WINDOW_BYTES en vez de cargar
+ * el archivo entero. Las funciones de parseo de arriba trabajan con
+ * posiciones locales a `bytes`; `base` es la posición absoluta de su
+ * primer byte.
+ */
+class ByteWindow {
+  base = 0;
+  bytes: Uint8Array = new Uint8Array(0);
+  constructor(private readonly source: ByteSource) {}
+
+  /** Garantiza que [pos, pos+length) (recortado al archivo) está en la ventana. Devuelve la posición local de `pos`. */
+  async ensure(pos: number, length: number): Promise<number> {
+    const end = Math.min(pos + length, this.source.size);
+    if (pos < this.base || end > this.base + this.bytes.length) {
+      this.base = pos;
+      this.bytes = await this.source.read(pos, Math.min(this.source.size, pos + Math.max(length, WINDOW_BYTES)));
+    }
+    return pos - this.base;
+  }
+
+  /** Cabecera del elemento en `pos` (absoluto), con `dataStart` absoluto. */
+  async header(pos: number): Promise<ElementHeader | undefined> {
+    if (pos >= this.source.size) return undefined;
+    const local = await this.ensure(pos, 16);
+    const header = readElementHeader(this.bytes, local);
+    return header ? { ...header, dataStart: header.dataStart + this.base } : undefined;
+  }
+}
+
+export async function demuxMatroska(source: ByteSource): Promise<DemuxedTrack> {
+  const win = new ByteWindow(source);
+  const ebml = await win.header(0);
   if (!ebml || ebml.id !== ID.EBML || ebml.size === UNKNOWN_SIZE) {
     throw new Error("No es un archivo Matroska/WebM válido");
   }
   let pos = ebml.dataStart + ebml.size;
   let segment: ElementHeader | undefined;
-  while (pos < bytes.length) {
-    const header = readElementHeader(bytes, pos);
+  while (pos < source.size) {
+    const header = await win.header(pos);
     if (!header) break;
     if (header.id === ID.Segment) {
       segment = header;
@@ -263,88 +301,122 @@ export function demuxMatroska(bytes: Uint8Array): DemuxedTrack {
   }
   if (!segment) throw new Error("Matroska: el archivo no tiene Segment");
   const segmentEnd =
-    segment.size === UNKNOWN_SIZE ? bytes.length : Math.min(bytes.length, segment.dataStart + segment.size);
+    segment.size === UNKNOWN_SIZE ? source.size : Math.min(source.size, segment.dataStart + segment.size);
 
   let timecodeScaleNs = 1_000_000;
   let durationUnits: number | undefined;
   let track: MatroskaVideoTrack | undefined;
-  /** [inicio de datos, fin] de cada Cluster — se procesan al final, cuando ya se conoce la pista. */
-  const clusters: Array<[number, number]> = [];
+  /** Clusters vistos antes que Tracks (no debería pasar): se recorren al final. */
+  const pendingClusters: ElementHeader[] = [];
+  const blocks: RawBlock[] = [];
+
+  /** Recorre los hijos de un Cluster (de tamaño conocido o no) y apunta los bloques de la pista de vídeo. Devuelve dónde acaba. */
+  async function walkCluster(cluster: ElementHeader, videoTrack: MatroskaVideoTrack): Promise<number> {
+    const end =
+      cluster.size === UNKNOWN_SIZE ? segmentEnd : Math.min(cluster.dataStart + cluster.size, segmentEnd);
+    let clusterTimecode = 0;
+    let p = cluster.dataStart;
+    while (p < end) {
+      const el = await win.header(p);
+      if (!el || el.size === UNKNOWN_SIZE) return p;
+      // Un Cluster sin tamaño acaba donde empieza el siguiente elemento de nivel 1.
+      if (cluster.size === UNKNOWN_SIZE && LEVEL1_IDS.has(el.id)) return p;
+      const dataEnd = Math.min(el.dataStart + el.size, end);
+      if (el.id === ID.Timecode) {
+        const local = await win.ensure(el.dataStart, el.size);
+        clusterTimecode = readUint(win.bytes, local, el.size);
+      } else if (el.id === ID.SimpleBlock) {
+        // Solo la cabecera del bloque: los bytes del fotograma no se leen aquí.
+        const local = await win.ensure(el.dataStart, 16);
+        const block = parseBlock(win.bytes, local, local + (dataEnd - el.dataStart));
+        if (block.track === videoTrack.number) {
+          assertNoLacing(block.flags);
+          const offset = win.base + block.payloadStart;
+          blocks.push({
+            timecode: clusterTimecode + block.relativeTimecode,
+            key: (block.flags & 0x80) !== 0,
+            offset,
+            size: dataEnd - offset,
+          });
+        }
+      } else if (el.id === ID.BlockGroup) {
+        let raw: ReturnType<typeof parseBlock> | undefined;
+        let rawOffset = 0;
+        let rawEnd = 0;
+        let duration: number | undefined;
+        let hasReference = false;
+        let q = el.dataStart;
+        while (q < dataEnd) {
+          const child = await win.header(q);
+          if (!child || child.size === UNKNOWN_SIZE) break;
+          const childEnd = Math.min(child.dataStart + child.size, dataEnd);
+          if (child.id === ID.Block) {
+            const local = await win.ensure(child.dataStart, 16);
+            raw = parseBlock(win.bytes, local, local + (childEnd - child.dataStart));
+            rawOffset = win.base + raw.payloadStart;
+            rawEnd = childEnd;
+          } else if (child.id === ID.BlockDuration) {
+            const local = await win.ensure(child.dataStart, child.size);
+            duration = readUint(win.bytes, local, child.size);
+          } else if (child.id === ID.ReferenceBlock) {
+            hasReference = true;
+          }
+          q = child.dataStart + child.size;
+        }
+        if (raw && raw.track === videoTrack.number) {
+          assertNoLacing(raw.flags);
+          blocks.push({
+            timecode: clusterTimecode + raw.relativeTimecode,
+            key: !hasReference,
+            offset: rawOffset,
+            size: rawEnd - rawOffset,
+            ...(duration !== undefined ? { duration } : {}),
+          });
+        }
+      }
+      p = el.dataStart + el.size;
+    }
+    return Math.min(p, end);
+  }
 
   pos = segment.dataStart;
   while (pos < segmentEnd) {
-    const header = readElementHeader(bytes, pos);
+    const header = await win.header(pos);
     if (!header) break;
-    let end: number;
-    if (header.size === UNKNOWN_SIZE) {
-      if (header.id !== ID.Cluster) break; // solo Cluster puede venir sin tamaño en la práctica
-      end = findUnknownSizeEnd(bytes, header.dataStart, segmentEnd);
-    } else {
-      end = Math.min(header.dataStart + header.size, segmentEnd);
+    if (header.id === ID.Cluster) {
+      if (track) {
+        pos = await walkCluster(header, track);
+      } else {
+        pendingClusters.push(header);
+        if (header.size === UNKNOWN_SIZE) break;
+        pos = header.dataStart + header.size;
+      }
+      continue;
     }
-    switch (header.id) {
-      case ID.Info:
-        forEachChild(bytes, header.dataStart, end, (el) => {
+    if (header.size === UNKNOWN_SIZE) break; // solo Cluster puede venir sin tamaño en la práctica
+    const end = Math.min(header.dataStart + header.size, segmentEnd);
+    if (header.id === ID.Info || header.id === ID.Tracks) {
+      const local = await win.ensure(header.dataStart, end - header.dataStart);
+      const bytes = win.bytes;
+      const localEnd = local + (end - header.dataStart);
+      if (header.id === ID.Info) {
+        forEachChild(bytes, local, localEnd, (el) => {
           if (el.id === ID.TimecodeScale) timecodeScaleNs = readUint(bytes, el.dataStart, el.size) || 1_000_000;
           if (el.id === ID.Duration) durationUnits = readFloat(bytes, el.dataStart, el.size);
         });
-        break;
-      case ID.Tracks:
-        forEachChild(bytes, header.dataStart, end, (el, dataEnd) => {
-          if (el.id === ID.TrackEntry && !track) track = parseTrackEntry(bytes, el.dataStart, dataEnd);
+      } else {
+        // Los CodecPrivate se copian: la ventana se reutiliza al seguir leyendo.
+        forEachChild(bytes, local, localEnd, (el, dataEnd) => {
+          if (el.id === ID.TrackEntry && !track) track = parseTrackEntry(bytes.slice(el.dataStart, dataEnd), 0, dataEnd - el.dataStart);
         });
-        break;
-      case ID.Cluster:
-        clusters.push([header.dataStart, end]);
-        break;
+      }
     }
     pos = end;
   }
 
   if (!track) throw new Error("El archivo no contiene ninguna pista de vídeo");
   const videoTrack = track;
-
-  const blocks: RawBlock[] = [];
-  for (const [start, end] of clusters) {
-    let clusterTimecode = 0;
-    forEachChild(bytes, start, end, (el, dataEnd) => {
-      if (el.id === ID.Timecode) {
-        clusterTimecode = readUint(bytes, el.dataStart, el.size);
-      } else if (el.id === ID.SimpleBlock) {
-        const block = parseBlock(bytes, el.dataStart, dataEnd);
-        if (block.track !== videoTrack.number) return;
-        assertNoLacing(block.flags);
-        blocks.push({
-          timecode: clusterTimecode + block.relativeTimecode,
-          key: (block.flags & 0x80) !== 0,
-          data: bytes.subarray(block.payloadStart, dataEnd),
-        });
-      } else if (el.id === ID.BlockGroup) {
-        let raw: ReturnType<typeof parseBlock> | undefined;
-        let rawEnd = 0;
-        let duration: number | undefined;
-        let hasReference = false;
-        forEachChild(bytes, el.dataStart, dataEnd, (child, childEnd) => {
-          if (child.id === ID.Block) {
-            raw = parseBlock(bytes, child.dataStart, childEnd);
-            rawEnd = childEnd;
-          } else if (child.id === ID.BlockDuration) {
-            duration = readUint(bytes, child.dataStart, child.size);
-          } else if (child.id === ID.ReferenceBlock) {
-            hasReference = true;
-          }
-        });
-        if (!raw || raw.track !== videoTrack.number) return;
-        assertNoLacing(raw.flags);
-        blocks.push({
-          timecode: clusterTimecode + raw.relativeTimecode,
-          key: !hasReference,
-          data: bytes.subarray(raw.payloadStart, rawEnd),
-          ...(duration !== undefined ? { duration } : {}),
-        });
-      }
-    });
-  }
+  for (const cluster of pendingClusters) await walkCluster(cluster, videoTrack);
   if (blocks.length === 0) throw new Error("La pista de vídeo no tiene fotogramas");
 
   const unitToUs = timecodeScaleNs / 1000;
@@ -353,12 +425,15 @@ export function demuxMatroska(bytes: Uint8Array): DemuxedTrack {
     duration: block.duration !== undefined ? Math.round(block.duration * unitToUs) : 0,
     timescale: 1_000_000,
     is_sync: block.key,
-    data: videoTrack.strippedHeader ? concat(videoTrack.strippedHeader, block.data) : block.data,
+    offset: block.offset,
+    size: block.size,
   }));
   const frameRate = snapFrameRate(estimateFps(samples, videoTrack.defaultDurationNs));
   snapToFrameGrid(samples, frameRate, unitToUs);
   fillDurations(samples, videoTrack.defaultDurationNs !== undefined ? videoTrack.defaultDurationNs / 1000 : undefined);
 
+  const loader = new SampleDataLoader(source, samples, videoTrack.strippedHeader);
+  await loader.ensure(0, 0); // el primer fotograma hace falta para la cadena de códec de VP9
   const { codec, description } = codecForTrack(videoTrack, samples[0]!.data!);
   const lastEndUs = Math.max(...samples.map((sample) => sample.cts + sample.duration));
   const durationUs = durationUnits !== undefined && durationUnits > 0 ? Math.round(durationUnits * unitToUs) : lastEndUs;
@@ -376,31 +451,14 @@ export function demuxMatroska(bytes: Uint8Array): DemuxedTrack {
     samples,
     ...(description ? { decoderDescription: description } : {}),
     frameRate,
+    loader,
   };
-}
-
-/** Fin de un Cluster de tamaño desconocido: el siguiente elemento de nivel 1, o el fin del Segment. */
-function findUnknownSizeEnd(bytes: Uint8Array, start: number, segmentEnd: number): number {
-  let pos = start;
-  while (pos < segmentEnd) {
-    const header = readElementHeader(bytes, pos);
-    if (!header || header.size === UNKNOWN_SIZE || LEVEL1_IDS.has(header.id)) return pos;
-    pos = header.dataStart + header.size;
-  }
-  return Math.min(pos, segmentEnd);
 }
 
 function assertNoLacing(flags: number): void {
   if ((flags & 0x06) !== 0) {
     throw new Error("Matroska: el vídeo usa lacing (varios fotogramas por bloque), no soportado");
   }
-}
-
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
 }
 
 /**

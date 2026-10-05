@@ -3,6 +3,7 @@ import { av1CodecFromAv1C, avcCodecFromAvcC, hevcCodecFromHvcC, nalToRbsp, vp9Co
 import { demuxMatroska } from "./demuxMatroska";
 import { annexBNalUnits, demuxMpegTs, extractMpegTsAudio } from "./demuxMpegTs";
 import { sniffContainer } from "./samples";
+import { byteSourceFromBytes, SampleDataLoader, type ByteSource } from "./sampleData";
 import { snapFrameRate } from "./sourceFile";
 
 // --- Matroska inventado -------------------------------------------------
@@ -72,9 +73,16 @@ function makeMkv(options: { unknownSizeCluster?: boolean } = {}): Uint8Array {
   return Uint8Array.from([...el(0x1a45dfa3, str(0x4282, "matroska")), ...segment]);
 }
 
+/** Demuxa y carga todas las muestras (los bytes van bajo demanda, ver media/sampleData.ts). */
+async function demuxMkv(bytes: Uint8Array) {
+  const demuxed = await demuxMatroska(byteSourceFromBytes(bytes));
+  await demuxed.loader!.ensure(0, demuxed.samples.length - 1);
+  return demuxed;
+}
+
 describe("demuxMatroska", () => {
-  it("lee códec, tamaño, keyframes y orden de decodificación de la pista de vídeo", () => {
-    const demuxed = demuxMatroska(makeMkv());
+  it("lee códec, tamaño, keyframes y orden de decodificación de la pista de vídeo", async () => {
+    const demuxed = await demuxMkv(makeMkv());
     expect(demuxed.videoTrack.codec).toBe("avc1.64001f");
     expect(demuxed.videoTrack.video).toEqual({ width: 1920, height: 1080 });
     expect(Array.from(demuxed.decoderDescription!)).toEqual(AVCC);
@@ -82,15 +90,78 @@ describe("demuxMatroska", () => {
     expect(demuxed.samples.map((s) => s.is_sync)).toEqual([true, false, false, false]);
   });
 
-  it("devuelve a la rejilla de 30000/1001 los timestamps redondeados al milisegundo", () => {
-    const demuxed = demuxMatroska(makeMkv());
+  it("devuelve a la rejilla de 30000/1001 los timestamps redondeados al milisegundo", async () => {
+    const demuxed = await demuxMkv(makeMkv());
     expect(demuxed.frameRate).toEqual({ numerator: 30000, denominator: 1001 });
     expect(demuxed.samples.map((s) => s.cts)).toEqual([0, 66733, 33367, 100100]);
     expect(demuxed.samples.every((s) => s.timescale === 1_000_000 && s.duration > 0)).toBe(true);
   });
 
-  it("soporta Clusters de tamaño desconocido (MediaRecorder, grabación en directo)", () => {
-    expect(demuxMatroska(makeMkv({ unknownSizeCluster: true })).samples).toHaveLength(4);
+  it("soporta Clusters de tamaño desconocido (MediaRecorder, grabación en directo)", async () => {
+    const demuxed = await demuxMkv(makeMkv({ unknownSizeCluster: true }));
+    expect(demuxed.samples.map((s) => s.data![0])).toEqual([0xaa, 0xbb, 0xcc, 0xdd]);
+  });
+
+  it("guarda dónde está cada fotograma en el archivo, no sus bytes", async () => {
+    const bytes = makeMkv();
+    const demuxed = await demuxMatroska(byteSourceFromBytes(bytes));
+    expect(demuxed.samples.map((s) => [s.size, bytes[s.offset!]])).toEqual([
+      [1, 0xaa],
+      [1, 0xbb],
+      [1, 0xcc],
+      [1, 0xdd],
+    ]);
+  });
+});
+
+// --- Cargador de muestras bajo demanda ------------------------------------
+
+/** Fuente en memoria que cuenta las lecturas, para comprobar qué se lee y cuándo. */
+function countingSource(bytes: Uint8Array): ByteSource & { reads: Array<[number, number]> } {
+  const reads: Array<[number, number]> = [];
+  return {
+    size: bytes.length,
+    reads,
+    async read(start, end) {
+      reads.push([start, end]);
+      return bytes.subarray(start, end);
+    },
+  };
+}
+
+describe("SampleDataLoader", () => {
+  const fileBytes = Uint8Array.from({ length: 1000 }, (_, i) => i % 256);
+  const makeSamples = () => Array.from({ length: 100 }, (_, i) => ({ offset: i * 10, size: 10 }) as { offset: number; size: number; data?: Uint8Array });
+
+  it("lee por bloques solo lo que se pide, y una sola vez", async () => {
+    const source = countingSource(fileBytes);
+    const samples = makeSamples();
+    const loader = new SampleDataLoader(source, samples);
+    await loader.ensure(0, 3);
+    expect(source.reads).toHaveLength(1);
+    expect(Array.from(samples[2]!.data!)).toEqual([20, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
+    expect(samples[60]!.data).toBeUndefined();
+    await loader.ensure(1, 2);
+    expect(source.reads).toHaveLength(1);
+  });
+
+  it("suelta los bloques menos usados al pasar del tope y los relee si vuelven a hacer falta", async () => {
+    const source = countingSource(fileBytes);
+    const samples = makeSamples();
+    const loader = new SampleDataLoader(source, samples, undefined, 600); // menos de dos bloques de 48 × 10 B
+    await loader.ensure(0, 0);
+    await loader.ensure(60, 60);
+    expect(samples[0]!.data).toBeUndefined();
+    expect(samples[60]!.data).toBeDefined();
+    await loader.ensure(0, 0);
+    expect(samples[0]!.data![0]).toBe(0);
+    expect(source.reads).toHaveLength(3);
+  });
+
+  it("antepone el prefijo de header stripping a cada muestra", async () => {
+    const samples = makeSamples();
+    await new SampleDataLoader(byteSourceFromBytes(fileBytes), samples, Uint8Array.from([0xee])).ensure(1, 1);
+    expect(Array.from(samples[1]!.data!.subarray(0, 3))).toEqual([0xee, 10, 11]);
   });
 });
 

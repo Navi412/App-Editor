@@ -1,5 +1,5 @@
 import { sampleDurationUs, sampleTimestampUs } from "./sampleTime";
-import { baseDecoderConfig, isHevcCodec, type DemuxedTrack } from "./samples";
+import { baseDecoderConfig, ensureSampleData, isHevcCodec, type DemuxedTrack } from "./samples";
 import { yieldToTaskQueue } from "./scheduling";
 
 /**
@@ -148,6 +148,25 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
     const effectiveTimeUs = Math.max(timeUs, target.timestampUs);
     const feedUpTo = Math.min(samples.length - 1, target.index + LOOKAHEAD_SAMPLES);
     currentTargetUs = effectiveTimeUs;
+
+    // Si el objetivo está más allá del siguiente keyframe, no hace falta
+    // decodificar lo de en medio: se salta al keyframe anterior al
+    // objetivo (alimentar un keyframe es válido en cualquier momento).
+    // Antes la primera llamada decodificaba desde el principio del
+    // archivo: exportar un clip que empieza en el minuto 4 de la fuente
+    // decodificaba 4 minutos de vídeo antes del primer fotograma útil.
+    let targetKeyframe = target.index;
+    while (targetKeyframe > 0 && !samples[targetKeyframe]!.is_sync) targetKeyframe--;
+    if (targetKeyframe > nextIndex) {
+      nextIndex = targetKeyframe;
+      needsKeyframe = false;
+    }
+
+    // Lo que se va a alimentar (incluido el re-cebado desde el keyframe),
+    // leído del disco si aún no está — ver media/sampleData.ts.
+    let readFrom = Math.min(nextIndex, samples.length - 1);
+    if (needsKeyframe) while (readFrom > 0 && !samples[readFrom]!.is_sync) readFrom--;
+    await ensureSampleData(demuxed, readFrom, feedUpTo);
 
     primeIfNeeded();
 

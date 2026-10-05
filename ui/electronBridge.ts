@@ -1,3 +1,5 @@
+import type { ByteSource } from "../media/sampleData";
+
 /**
  * Puente hacia electron/preload.cjs — ver ese archivo para el porqué de
  * no usar IPC. `window.appVideo` solo existe dentro de la app de
@@ -11,6 +13,10 @@ export interface AppVideoBridge {
   getPathForFile(file: File): string;
   /** Bytes de un archivo por ruta absoluta. */
   readFileAsBytes(filePath: string): Promise<ArrayBuffer>;
+  /** Tamaño en bytes de un archivo por ruta. */
+  fileSize(filePath: string): Promise<number>;
+  /** Bytes [start, end) de un archivo por ruta, sin leerlo entero. */
+  readFileRange(filePath: string, start: number, end: number): Promise<ArrayBuffer>;
   /** true si `filePath` sigue existiendo en disco. */
   fileExists(filePath: string): Promise<boolean>;
   /** Se suscribe a las acciones del menú de aplicación nativo (ver electron/main.cjs). Solo existe dentro de Electron. */
@@ -31,4 +37,15 @@ export function getAppVideoBridge(): AppVideoBridge | undefined {
 export async function readFileFromPath(bridge: AppVideoBridge, filePath: string, fileName: string): Promise<File> {
   const bytes = await bridge.readFileAsBytes(filePath);
   return new File([bytes], fileName);
+}
+
+/** Lecturas por rango de un archivo por ruta: así un vídeo reabierto desde un proyecto no se carga entero en memoria (ver media/sampleData.ts). */
+export async function byteSourceFromPath(bridge: AppVideoBridge, filePath: string): Promise<ByteSource> {
+  const size = await bridge.fileSize(filePath);
+  return {
+    size,
+    async read(start, end) {
+      return new Uint8Array(await bridge.readFileRange(filePath, start, Math.min(end, size)));
+    },
+  };
 }

@@ -30,6 +30,22 @@ contextBridge.exposeInMainWorld("appVideo", {
     const buffer = await fs.readFile(filePath);
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
   },
+  /** Tamaño en bytes de un archivo por ruta. */
+  async fileSize(filePath) {
+    return (await fs.stat(filePath)).size;
+  },
+  /** Bytes [start, end) de un archivo por ruta, sin leerlo entero — para leer vídeos grandes bajo demanda (media/sampleData.ts). */
+  async readFileRange(filePath, start, end) {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const length = Math.max(0, end - start);
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, start);
+      return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + bytesRead);
+    } finally {
+      await handle.close();
+    }
+  },
   /** true si `filePath` sigue existiendo — usado para reemparejar un proyecto guardado sin pedirle al usuario que re-seleccione archivos que no se han movido. */
   async fileExists(filePath) {
     try {

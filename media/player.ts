@@ -1,4 +1,5 @@
-import { baseDecoderConfig, type DemuxedTrack, type DemuxedVideoTrack } from "./samples";
+import { PREFETCH_SAMPLES } from "./sampleData";
+import { baseDecoderConfig, ensureSampleData, type DemuxedTrack, type DemuxedVideoTrack } from "./samples";
 import { sampleDurationUs, sampleTimestampUs } from "./sampleTime";
 
 /**
@@ -157,6 +158,25 @@ export function createVideoPlayer(
     }
   }
 
+  // Lectura del disco en curso (ver media/sampleData.ts): feed() no
+  // puede esperarla (va en el rAF de tick), así que se pide y, cuando
+  // llega, se vuelve a alimentar.
+  let dataRequest: Promise<void> | undefined;
+
+  function requestSampleData(index: number): void {
+    const loader = demuxed.loader;
+    if (!loader || dataRequest) return;
+    dataRequest = loader
+      .prefetch(index)
+      .catch((error: unknown) => {
+        callbacks.onStatus?.(`Error leyendo el vídeo del disco: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        dataRequest = undefined;
+        if (playing) feed();
+      });
+  }
+
   function feed(): void {
     while (
       nextSampleIndex < samples.length &&
@@ -164,8 +184,17 @@ export function createVideoPlayer(
       outputQueue.length < MAX_BUFFERED_FRAMES
     ) {
       const sample = samples[nextSampleIndex]!;
+      if (!sample.data) {
+        // Sin loader no hay de dónde sacarlos (muestra vacía): se salta,
+        // como siempre. Con loader, aún no se ha leído: se espera a él.
+        if (!demuxed.loader) {
+          nextSampleIndex++;
+          continue;
+        }
+        requestSampleData(nextSampleIndex);
+        break;
+      }
       nextSampleIndex++;
-      if (!sample.data) continue;
       decoder.decode(
         new EncodedVideoChunk({
           type: sample.is_sync ? "key" : "delta",
@@ -174,6 +203,13 @@ export function createVideoPlayer(
           data: sample.data,
         }),
       );
+    }
+    // Leer por delante de la reproducción, para no tener que esperar al
+    // disco justo cuando el decoder pide el siguiente fotograma.
+    const loader = demuxed.loader;
+    const aheadEnd = Math.min(samples.length - 1, nextSampleIndex + PREFETCH_SAMPLES / 2);
+    if (loader && playing && nextSampleIndex < samples.length && !loader.isLoaded(nextSampleIndex, aheadEnd)) {
+      requestSampleData(nextSampleIndex);
     }
   }
 
@@ -269,6 +305,15 @@ export function createVideoPlayer(
 
     let keyframeIndex = targetDecodeIndex;
     while (keyframeIndex > 0 && !samples[keyframeIndex]!.is_sync) keyframeIndex--;
+
+    // Los bytes del GOP hasta el objetivo, del disco si aún no están.
+    try {
+      await ensureSampleData(demuxed, keyframeIndex, targetDecodeIndex);
+    } catch (error) {
+      callbacks.onStatus?.(`Error leyendo el vídeo del disco: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (generation !== seekGeneration) return; // un seek más nuevo manda
 
     // Decoder nuevo en vez de reset(): evita depender de que reset()+
     // configure() deje al decoder en un estado limpio equivalente, y

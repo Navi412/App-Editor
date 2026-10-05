@@ -3,6 +3,7 @@ import type { FrameRate } from "../core/time";
 import { getDecoderDescription } from "./description";
 import { demuxMatroska } from "./demuxMatroska";
 import { demuxMpegTs, mpegTsPacketLayout } from "./demuxMpegTs";
+import { byteSourceFromBlob, SampleDataLoader, type ByteSource } from "./sampleData";
 
 /**
  * Una muestra comprimida (un fotograma codificado) de la pista de
@@ -10,6 +11,11 @@ import { demuxMpegTs, mpegTsPacketLayout } from "./demuxMpegTs";
  * de /media: las muestras de mp4box encajan tal cual, y los demuxers
  * propios (Matroska/WebM, MPEG-TS) construyen objetos con esta misma
  * forma. `cts`/`duration` van en la escala `timescale` de la muestra.
+ *
+ * `data` puede faltar: en MP4 y Matroska las muestras solo guardan
+ * dónde están en el archivo (`offset`/`size`) y `DemuxedTrack.loader`
+ * las lee del disco cuando hacen falta (ver media/sampleData.ts). Quien
+ * decodifica llama antes a `ensureSampleData`.
  */
 export interface DemuxedSample {
   cts: number;
@@ -17,6 +23,8 @@ export interface DemuxedSample {
   timescale: number;
   is_sync: boolean;
   data?: Uint8Array;
+  offset?: number;
+  size?: number;
 }
 
 /** Igual que DemuxedSample: el subconjunto de `Track` de mp4box que usa /media. `duration` en `timescale`. */
@@ -38,6 +46,13 @@ export interface DemuxedTrack {
   decoderDescription?: Uint8Array;
   /** Frame rate ya conocida por el demuxer (p.ej. DefaultDuration de Matroska); si falta se infiere de las duraciones de muestra (ver frameRateOf). */
   frameRate?: FrameRate;
+  /** Lee del disco los bytes de las muestras bajo demanda. Ausente si todas traen ya `data` (MPEG-TS, tests). */
+  loader?: SampleDataLoader;
+}
+
+/** Asegura que las muestras [from, to] (orden de decodificación) tienen sus bytes en memoria. */
+export function ensureSampleData(demuxed: DemuxedTrack, from: number, to: number): Promise<void> {
+  return demuxed.loader ? demuxed.loader.ensure(from, to) : Promise.resolve();
 }
 
 /** Contenedores que sabemos leer. Los códecs dentro de ellos son los que WebCodecs decodifique en esta máquina. */
@@ -71,42 +86,111 @@ function describeUnknownContainer(head: Uint8Array): string {
 }
 
 /**
- * Demuxa TODAS las muestras comprimidas de la primera pista de vídeo
- * de un archivo (metadatos + datos, sin decodificar). Para clips
- * cortos esto es aceptable: lo que se guarda en memoria sigue siendo
- * el flujo comprimido, no fotogramas decodificados. Si el proyecto
- * necesitara clips largos habría que pasar a extracción por streaming
- * en vez de cargar toda la tabla de muestras de una vez — eso queda
- * fuera de esta rebanada.
+ * Lee la tabla de muestras de la primera pista de vídeo de un archivo
+ * (tiempos, keyframes y dónde está cada fotograma), sin decodificar.
+ * Los bytes de las muestras NO se cargan aquí (salvo en MPEG-TS, donde
+ * cada fotograma está repartido en paquetes y hay que reensamblarlo):
+ * los lee el `loader` bajo demanda, así que un vídeo de 1 GB no ocupa
+ * 1 GB de memoria.
+ *
+ * `source` permite leer por ruta en Electron (proyectos reabiertos) sin
+ * crear un File en memoria; por defecto se lee el propio `file` (un File
+ * del selector o de arrastrar está respaldado por disco).
  *
  * Contenedores: MP4/MOV/M4V/3GP (mp4box.js), Matroska/WebM
  * (demuxMatroska) y MPEG-TS/M2TS (demuxMpegTs). Que el códec de dentro
  * se pueda decodificar lo comprueba checkDecodable aparte.
  */
-export async function decodeAllSamples(file: File): Promise<DemuxedTrack> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  const container = sniffContainer(bytes.subarray(0, 400));
-  switch (container) {
+export async function decodeAllSamples(file: Blob, source: ByteSource = byteSourceFromBlob(file)): Promise<DemuxedTrack> {
+  const head = await source.read(0, Math.min(400, source.size));
+  switch (sniffContainer(head)) {
     case "matroska":
-      return demuxMatroska(bytes);
+      return demuxMatroska(source);
     case "mpegts":
-      return demuxMpegTs(bytes);
+      return demuxMpegTs(await source.read(0, source.size));
     case "iso":
-      return demuxIso(buffer);
+      return demuxIso(source);
     case "unknown":
       throw new Error(
-        `Formato de archivo no soportado (${describeUnknownContainer(bytes)}). ` +
+        `Formato de archivo no soportado (${describeUnknownContainer(head)}). ` +
           `Se admiten MP4, MOV, M4V, 3GP, WebM, MKV y MPEG-TS (.ts/.mts/.m2ts).`,
       );
   }
 }
 
-function demuxIso(buffer: ArrayBuffer): Promise<DemuxedTrack> {
+/** Cajas de nivel superior de un ISO BMFF: [tipo, posición, tamaño]. Solo lee sus cabeceras. */
+async function topLevelBoxes(source: ByteSource): Promise<Array<{ type: string; start: number; size: number }>> {
+  const boxes: Array<{ type: string; start: number; size: number }> = [];
+  for (let pos = 0; pos + 8 <= source.size; ) {
+    const header = await source.read(pos, Math.min(pos + 16, source.size));
+    const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    let size = view.getUint32(0);
+    const type = String.fromCharCode(...header.subarray(4, 8));
+    if (size === 1 && header.length >= 16) size = Number(view.getBigUint64(8));
+    else if (size === 0) size = source.size - pos;
+    if (size < 8) break; // archivo corrupto: se deja de recorrer
+    boxes.push({ type, start: pos, size });
+    pos += size;
+  }
+  return boxes;
+}
+
+/**
+ * MP4/MOV sin leer el `mdat`: se le da a mp4box solo el resto de cajas
+ * (ftyp + moov, unos pocos KB/MB) y se toma la tabla de muestras que
+ * construye a partir del moov — cada muestra trae su `offset`/`size`
+ * absolutos en el archivo (los de la tabla stco/stsz), que es justo lo
+ * que necesita el loader. Los MP4 fragmentados (moof, p.ej. el "MP4
+ * fragmentado" de OBS) reparten la tabla por todo el archivo: para
+ * esos se mantiene la lectura completa de siempre.
+ */
+async function demuxIso(source: ByteSource): Promise<DemuxedTrack> {
+  const boxes = await topLevelBoxes(source);
+  const fragmented = boxes.some((box) => box.type === "moof");
+  const hasMoov = boxes.some((box) => box.type === "moov");
+  if (fragmented || !hasMoov) {
+    const all = await source.read(0, source.size);
+    return parseIso(all.slice().buffer, false);
+  }
+  const kept = boxes.filter((box) => box.type !== "mdat");
+  const total = kept.reduce((sum, box) => sum + box.size, 0);
+  const metadata = new Uint8Array(total);
+  let offset = 0;
+  for (const box of kept) {
+    metadata.set(await source.read(box.start, box.start + box.size), offset);
+    offset += box.size;
+  }
+  const demuxed = await parseIso(metadata.buffer, true);
+  return { ...demuxed, loader: new SampleDataLoader(source, demuxed.samples) };
+}
+
+/**
+ * La edit list (elst) de un MP4 dice en qué instante de la pista empieza
+ * de verdad la presentación. Con B-frames, los codificadores retrasan
+ * todos los cts unos fotogramas y lo compensan con `media_time` (p.ej.
+ * 2002/30000 = 2 fotogramas en x264). Sin aplicarlo, el tiempo de
+ * fuente 0 caía 2 fotogramas antes del primer fotograma real: el vídeo
+ * iba por detrás del audio (que decodeAudioData sí entrega alineado) en
+ * casi cualquier MP4 H.264 de móvil, cámara u OBS. Se toma la primera
+ * entrada no vacía; los retrasos iniciales (entradas vacías, rarísimos)
+ * se ignoran.
+ */
+function applyEditListOffset(track: Track, samples: Sample[]): void {
+  const edit = track.edits?.find((entry) => entry.media_time >= 0);
+  if (!edit || edit.media_time <= 0) return;
+  for (const sample of samples) {
+    // media_time va en la escala de la pista, igual que cts/dts.
+    sample.cts -= edit.media_time;
+    sample.dts -= edit.media_time;
+  }
+}
+
+/** `lazy`: el buffer solo tiene metadatos — se toma la tabla de muestras del moov en vez de extraerlas con sus datos. */
+function parseIso(buffer: ArrayBuffer, lazy: boolean): Promise<DemuxedTrack> {
   return new Promise((resolve, reject) => {
     const isoFile: ISOFile = createFile();
     let videoTrack: Track | undefined;
-    const samples: Sample[] = [];
+    let samples: Sample[] = [];
 
     isoFile.onError = (module, message) => {
       reject(new Error(`mp4box (${module}): ${message}`));
@@ -127,6 +211,12 @@ function demuxIso(buffer: ArrayBuffer): Promise<DemuxedTrack> {
         );
         return;
       }
+      if (lazy) {
+        // La tabla completa ya está construida a partir del moov (offset,
+        // size, cts, is_sync, description), sin datos.
+        samples = (isoFile.getTrackById(videoTrack.id) as unknown as { samples: Sample[] }).samples;
+        return;
+      }
       // Sin nbSamples: extrae toda la pista (en lotes internos de
       // mp4box.js), todos entregados de forma síncrona más abajo
       // porque el archivo entero ya está en el buffer que se le pasa.
@@ -145,6 +235,7 @@ function demuxIso(buffer: ArrayBuffer): Promise<DemuxedTrack> {
       reject(new Error("No se pudo leer la pista de vídeo"));
       return;
     }
+    applyEditListOffset(videoTrack, samples);
     const firstSample = samples[0];
     const decoderDescription = firstSample ? getDecoderDescription(firstSample) : undefined;
     resolve({ videoTrack, samples, ...(decoderDescription ? { decoderDescription } : {}) });
@@ -213,7 +304,9 @@ export async function checkDecodable(demuxed: DemuxedTrack): Promise<DemuxedTrac
   }
   if (demuxed.videoTrack.video && demuxed.videoTrack.video.width > 0) return demuxed;
 
-  const firstKey = demuxed.samples.find((sample) => sample.is_sync && sample.data);
+  const firstKeyIndex = demuxed.samples.findIndex((sample) => sample.is_sync);
+  if (firstKeyIndex >= 0) await ensureSampleData(demuxed, firstKeyIndex, firstKeyIndex);
+  const firstKey = demuxed.samples[firstKeyIndex];
   if (!firstKey?.data) throw new Error("El vídeo no tiene ningún fotograma clave");
   const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
     let settled = false;

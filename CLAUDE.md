@@ -396,6 +396,35 @@ mientras estaba fuera; cada una va en su propio commit):
   de la primera pista de audio; si el proyecto empieza por un audio, se
   crea con una pista de vídeo vacía y salida 1920x1080 a 30 fps. Un
   .mp4/.mkv sin vídeo también cae por esta vía.
+- **Vídeo bajo demanda, no entero en memoria** (`media/sampleData.ts`).
+  Las muestras de MP4 y Matroska guardan solo `offset`/`size`;
+  `SampleDataLoader` (en `DemuxedTrack.loader`) lee del disco por
+  bloques de 48 muestras, con tope de 192 MB por fuente (LRU).
+  MP4: solo se leen ftyp+moov y se toma la tabla de muestras de mp4box
+  sin el mdat (los MP4 fragmentados siguen leyéndose enteros).
+  Matroska: se recorre el archivo por ventanas de 4 MB anotando
+  posiciones. MPEG-TS sigue en memoria (cada fotograma está repartido
+  en paquetes). Quien decodifica pide antes los bytes:
+  `ensureSampleData` en `seekTo`/seeker; `feed()` del player, que va
+  en el rAF, pide el bloque y se reanuda al llegar, y además lee por
+  delante (`PREFETCH_SAMPLES`). Un `File` del selector ya es un Blob
+  respaldado por disco; para proyectos reabiertos por ruta, el preload
+  expone `readFileRange`/`fileSize` (`byteSourceFromPath`) y
+  `autoResolveProjectSources` ya no lee los archivos enteros de
+  antemano. Medido con una grabación de OBS de 1 GB (4:37, AV1
+  1440p60): carga en ~3 s y ~220 MB en el proceso de la página
+  (~106 MB de ellos, el audio en PCM), frente a >1 GB antes.
+  **Sigue en memoria**: el audio decodificado (PCM entero, ~1,4 GB por
+  hora de estéreo a 48 kHz) y, mientras `decodeAudioData` trabaja, el
+  archivo entero una vez.
+- **Seeker de exportación**: si el objetivo está más allá del siguiente
+  keyframe, salta al keyframe anterior al objetivo. Antes, la primera
+  llamada decodificaba desde el principio del archivo (exportar un clip
+  del minuto 4 de una fuente decodificaba 4 minutos antes).
+- **Edit list de MP4/MOV** (`applyEditListOffset`): con B-frames los
+  codificadores retrasan los cts y lo compensan con `media_time` en la
+  elst; sin aplicarlo, el vídeo de casi cualquier MP4 H.264 iba unos
+  fotogramas por detrás del audio.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**

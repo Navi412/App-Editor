@@ -73,7 +73,7 @@ import {
   parseCubeLut,
 } from "../core/color";
 import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
-import { getAppVideoBridge, readFileFromPath } from "./electronBridge";
+import { byteSourceFromPath, getAppVideoBridge, readFileFromPath } from "./electronBridge";
 import { AUDIO_FILE_EXTENSIONS, decodeAudioAsset, isAudioOnlyFile } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
 import { createMasterAudioChain, type MasterAudioChain } from "../media/masterAudioChain";
@@ -4707,8 +4707,8 @@ saveProjectButton.addEventListener("click", () => {
 });
 
 let pendingProject: ProjectFile | undefined;
-/** Fuentes ya releídas por ruta (sin intervención del usuario) para el `pendingProject` actual — ver handleProjectFileSelected. Vacío si no hay puente de Electron o ninguna fuente tenía `filePath`. */
-let pendingAutoResolvedSources: Map<string, File> = new Map();
+/** Fuentes encontradas por su ruta guardada (sin intervención del usuario) para el `pendingProject` actual: sourceId → ruta — ver handleProjectFileSelected. Vacío si no hay puente de Electron o ninguna fuente tenía `filePath`. Solo la ruta: el archivo se lee después, bajo demanda. */
+let pendingAutoResolvedSources: Map<string, string> = new Map();
 
 loadProjectButton.addEventListener("click", () => projectFileInput.click());
 
@@ -4719,16 +4719,16 @@ projectFileInput.addEventListener("change", () => {
   void handleProjectFileSelected(file);
 });
 
-/** Intenta releer cada fuente con `filePath` guardado directamente por ruta (Electron, ver ui/electronBridge.ts) — sin molestar al usuario. Las que no tengan ruta, no existan ya ahí, o fallen al leerse, quedan fuera del resultado. */
-async function autoResolveProjectSources(sources: ProjectSource[]): Promise<Map<string, File>> {
-  const resolved = new Map<string, File>();
+/** Busca cada fuente con `filePath` guardado directamente por ruta (Electron, ver ui/electronBridge.ts) — sin molestar al usuario. Las que no tengan ruta o ya no existan ahí quedan fuera del resultado. No lee nada: antes se leían aquí todos los archivos enteros a la vez. */
+async function autoResolveProjectSources(sources: ProjectSource[]): Promise<Map<string, string>> {
+  const resolved = new Map<string, string>();
   const bridge = getAppVideoBridge();
   if (!bridge) return resolved;
   for (const source of sources) {
     if (!source.filePath) continue;
     try {
       if (await bridge.fileExists(source.filePath)) {
-        resolved.set(source.id, await readFileFromPath(bridge, source.filePath, source.fileName));
+        resolved.set(source.id, source.filePath);
       }
     } catch (error) {
       console.warn(`No se pudo releer ${source.fileName} por ruta guardada:`, error);
@@ -4779,7 +4779,7 @@ function nextFreeIdNumber(ids: string[]): number {
 
 async function applyPendingProject(project: ProjectFile, manualFiles: File[]): Promise<void> {
   const manualByName = new Map(manualFiles.map((file) => [file.name, file]));
-  const byId = new Map(pendingAutoResolvedSources);
+  const byId = new Map<string, File | string>(pendingAutoResolvedSources);
   const missing: ProjectSource[] = [];
   for (const source of project.sources) {
     if (byId.has(source.id)) continue;
@@ -4797,12 +4797,22 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
   const newSources = new Map<string, SourceEntry>();
   try {
     for (const projectSource of project.sources) {
-      const file = byId.get(projectSource.id)!;
+      const resolved = byId.get(projectSource.id)!;
+      const bridge = getAppVideoBridge();
+      // Por ruta (Electron): el vídeo se lee por rangos; el audio sí
+      // necesita el archivo entero (decodeAudioData), pero solo mientras
+      // se decodifica — este File temporal se suelta al acabar la vuelta.
+      const byPath = typeof resolved === "string" && bridge ? resolved : undefined;
+      const file =
+        typeof resolved === "string"
+          ? await readFileFromPath(bridge!, resolved, projectSource.fileName)
+          : resolved;
+      const byteSource = byPath ? await byteSourceFromPath(bridge!, byPath) : undefined;
       // Fuentes de solo audio (mp3/wav importados): nada de vídeo que demuxar.
       const demuxed =
         projectSource.kind === "audio"
           ? undefined
-          : await checkDecodable(await decodeAllSamples(file)).catch((error: unknown) => {
+          : await checkDecodable(await decodeAllSamples(file, byteSource)).catch((error: unknown) => {
               throw new Error(`${projectSource.fileName}: ${error instanceof Error ? error.message : String(error)}`);
             });
       const thumbnail = demuxed
@@ -4819,7 +4829,7 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
       // readFileFromPath. Solo se intenta capturar una ruta NUEVA para
       // archivos re-seleccionados a mano (File real de un <input>), así
       // la próxima recarga también los resuelve solos.
-      const filePath = projectSource.filePath ?? getFilePathIfAvailable(file);
+      const filePath = projectSource.filePath ?? (typeof resolved === "string" ? resolved : getFilePathIfAvailable(resolved));
       newSources.set(projectSource.id, {
         sourceFile: {
           id: projectSource.id,

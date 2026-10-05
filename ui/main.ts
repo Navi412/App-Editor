@@ -74,7 +74,7 @@ import {
 } from "../core/color";
 import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimeline";
 import { getAppVideoBridge, readFileFromPath } from "./electronBridge";
-import { decodeAudioAsset } from "../media/audio";
+import { AUDIO_FILE_EXTENSIONS, decodeAudioAsset, isAudioOnlyFile } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
 import { createMasterAudioChain, type MasterAudioChain } from "../media/masterAudioChain";
 import { ColorGradeRenderer, type ResolvedLut } from "../media/colorGradeGL";
@@ -129,9 +129,10 @@ const loadProjectButton = requireElement<HTMLButtonElement>("#load-project-butto
 const projectFileInput = requireElement<HTMLInputElement>("#project-file-input");
 const projectSourcesInput = requireElement<HTMLInputElement>("#project-sources-input");
 const projectStatus = requireElement<HTMLParagraphElement>("#project-status");
-// Una sola lista de formatos (media/samples.ts) para los dos selectores de vídeo.
-fileInput.accept = VIDEO_FILE_ACCEPT;
-projectSourcesInput.accept = VIDEO_FILE_ACCEPT;
+// Una sola lista de formatos (media/samples.ts + media/audio.ts) para los dos selectores.
+const MEDIA_FILE_ACCEPT = [VIDEO_FILE_ACCEPT, "audio/*", ...AUDIO_FILE_EXTENSIONS].join(",");
+fileInput.accept = MEDIA_FILE_ACCEPT;
+projectSourcesInput.accept = MEDIA_FILE_ACCEPT;
 const timelineScroll = requireElement<HTMLDivElement>("#timeline-scroll");
 const timelineContent = requireElement<HTMLDivElement>("#timeline-content");
 const timelineGutters = requireElement<HTMLDivElement>("#timeline-gutters");
@@ -285,7 +286,8 @@ try {
 
 interface SourceEntry {
   sourceFile: SourceFile;
-  demuxed: DemuxedTrack;
+  /** Ausente en las fuentes de solo audio (`sourceFile.kind === "audio"`: mp3/wav importados), que no tienen vídeo que decodificar. */
+  demuxed?: DemuxedTrack;
   fileName: string;
   /** Ruta absoluta real del archivo — solo disponible dentro de Electron (ver ui/electronBridge.ts), capturada con getPathForFile en cuanto se obtiene el File. Permite reabrir el proyecto sin volver a pedir el archivo si sigue en el mismo sitio. */
   filePath?: string;
@@ -652,6 +654,7 @@ function getPlayer(sourceId: string): VideoPlayer {
   const entry = sources.get(sourceId);
   if (!entry) throw new Error(`Fuente no encontrada: ${sourceId}`);
   touchPlayerPool(sourceId);
+  if (!entry.demuxed) throw new Error(`${entry.fileName} es solo de audio: no tiene vídeo que mostrar`);
   if (!entry.player) {
     evictPlayerPoolIfNeeded(sourceId);
     entry.player = createVideoPlayer(entry.demuxed, {
@@ -3288,13 +3291,109 @@ function topmostVideoTrackId(tl: Timeline): string | undefined {
   return undefined;
 }
 
+/** Resolución/frame rate de salida de un proyecto que empieza con un archivo de solo audio (no hay vídeo del que tomarlas). Se cambian en "Salida". */
+const DEFAULT_OUTPUT_RESOLUTION = { width: 1920, height: 1080 };
+const DEFAULT_OUTPUT_FRAME_RATE = { numerator: 30, denominator: 1 };
+
+/** Lo común a cargar el primer archivo de un proyecto o uno más: maqueta, controles, nombre, bin. */
+function afterMediaFileAdded(file: File): void {
+  if (!hasAutoFitted) {
+    hasAutoFitted = true;
+    zoomToFit();
+    // Al cargar el primer archivo cambia la maqueta (desaparece la zona de
+    // "suelta tu vídeo", aparece el inspector): se reajusta cuando ya está.
+    requestAnimationFrame(zoomToFit);
+  } else {
+    refreshTimelineLayout();
+  }
+  enableEditingControls();
+  syncMasterAudioPanel();
+  if (projectNameLabel.hidden) setProjectName(file.name);
+  renderMediaBin();
+}
+
+/**
+ * Importa un archivo de SOLO audio (mp3, wav, ogg, flac, m4a...) como
+ * fuente propia, con su clip al final de la primera pista de audio —
+ * ampliación pedida el 2026-10-05 (antes, una pista de audio solo podía
+ * llevar el audio de un vídeo ya cargado). false si no se pudo
+ * decodificar como audio.
+ */
+async function addAudioOnlyFile(file: File): Promise<boolean> {
+  const { audio, waveformPeaks } = await loadAudioForSource(file);
+  if (!audio) return false;
+  const sourceId = `source-${nextSourceNumber++}`;
+  const sourceFile: SourceFile = { id: sourceId, kind: "audio", durationTicks: secondsToTicks(audio.duration) };
+  const filePath = getFilePathIfAvailable(file);
+  sources.set(sourceId, {
+    sourceFile,
+    fileName: file.name,
+    audio,
+    ...(filePath ? { filePath } : {}),
+    ...(waveformPeaks ? { waveformPeaks } : {}),
+  });
+  const clip: Clip = {
+    id: `clip-${nextClipNumber++}`,
+    kind: "clip",
+    sourceId,
+    startTicks: 0,
+    sourceInTicks: 0,
+    sourceOutTicks: sourceFile.durationTicks,
+    volume: 1,
+    muted: false,
+  };
+
+  let trackId: string;
+  if (!timeline) {
+    // Proyecto que empieza por la música: una pista de vídeo vacía (para
+    // poder soltar vídeos después) y la de audio con el clip.
+    const videoTrackId = `video-${nextTrackNumber++}`;
+    trackId = `audio-${nextTrackNumber++}`;
+    commitTimeline({
+      tracks: [
+        { id: videoTrackId, kind: "video", hidden: false, clips: [] },
+        { id: trackId, kind: "audio", hidden: false, clips: [clip] },
+      ],
+      outputResolution: { ...DEFAULT_OUTPUT_RESOLUTION },
+      outputFrameRate: { ...DEFAULT_OUTPUT_FRAME_RATE },
+    });
+    canvas.width = DEFAULT_OUTPUT_RESOLUTION.width;
+    canvas.height = DEFAULT_OUTPUT_RESOLUTION.height;
+    outputWidthInput.value = String(DEFAULT_OUTPUT_RESOLUTION.width);
+    outputHeightInput.value = String(DEFAULT_OUTPUT_RESOLUTION.height);
+    outputFpsInput.value = String(DEFAULT_OUTPUT_FRAME_RATE.numerator / DEFAULT_OUTPUT_FRAME_RATE.denominator);
+  } else {
+    let base = timeline;
+    const existing = base.tracks.find((t) => t.kind === "audio")?.id;
+    trackId = existing ?? `audio-${nextTrackNumber++}`;
+    if (!existing) base = addTrack(base, trackId, "audio");
+    commitTimeline(appendClip(base, trackId, clip));
+  }
+  afterMediaFileAdded(file);
+  selectClipRef(trackId, clip.id);
+  status.textContent = `${file.name} añadido a una pista de audio — ${audio.duration.toFixed(1)} s.`;
+  return true;
+}
+
 async function addClipFromFile(file: File): Promise<void> {
   status.textContent = `Cargando ${file.name}...`;
   try {
+    if (isAudioOnlyFile(file)) {
+      if (!(await addAudioOnlyFile(file))) throw new Error("No se pudo decodificar el audio del archivo");
+      return;
+    }
     // checkDecodable falla pronto y con un mensaje claro si el códec no
     // se puede decodificar en este equipo, en vez de añadir un clip que
     // luego fallará en silencio al reproducirlo o exportarlo.
-    const demuxed = await checkDecodable(await decodeAllSamples(file));
+    let demuxed: DemuxedTrack;
+    try {
+      demuxed = await checkDecodable(await decodeAllSamples(file));
+    } catch (error) {
+      // Un .mp4/.mkv sin pista de vídeo (o con una extensión rara) puede
+      // ser solo audio: se intenta por esa vía antes de dar el error.
+      if (await addAudioOnlyFile(file)) return;
+      throw error;
+    }
     const sourceId = `source-${nextSourceNumber++}`;
     const sourceFile = toSourceFile(sourceId, demuxed);
     const thumbnail = await generateThumbnail(demuxed).catch((error: unknown) => {
@@ -3352,24 +3451,12 @@ async function addClipFromFile(file: File): Promise<void> {
     // una referencia ya no-nulable para el resto de la función.
     const currentTimeline = requireTimeline();
     const newTrackId = topmostVideoTrackId(currentTimeline)!;
-    if (!hasAutoFitted) {
-      hasAutoFitted = true;
-      zoomToFit();
-      // Al cargar el primer vídeo cambia la maqueta (desaparece la zona de
-      // "suelta tu vídeo", aparece el inspector): se reajusta cuando ya está.
-      requestAnimationFrame(zoomToFit);
-    } else {
-      refreshTimelineLayout();
-    }
-    enableEditingControls();
-    syncMasterAudioPanel();
-    if (projectNameLabel.hidden) setProjectName(file.name);
+    afterMediaFileAdded(file);
 
     selectClipRef(newTrackId, clip.id);
     const placed = currentTimeline.tracks.find((t) => t.id === newTrackId)!.clips.find((c) => c.id === clip.id)!;
     await seekToTimelineTicks(placed.startTicks);
     status.textContent = `${file.name} añadido — ${sourceFile.width}x${sourceFile.height} @ ${sourceFile.frameRate!.numerator}/${sourceFile.frameRate!.denominator} fps${audio ? " · con audio" : " · sin audio"}.`;
-    renderMediaBin();
   } catch (error) {
     console.error(error);
     status.textContent = `Error: ${error instanceof Error ? error.message : String(error)}`;
@@ -3401,6 +3488,7 @@ function renderMediaBin(): void {
     const thumb = document.createElement("div");
     thumb.className = "media-bin-thumb";
     if (entry.thumbnail) thumb.style.backgroundImage = `url(${entry.thumbnail})`;
+    else if (!entry.demuxed) thumb.innerHTML = iconMarkup("volume2"); // fuente de solo audio
 
     const info = document.createElement("div");
     info.className = "media-bin-info";
@@ -3417,7 +3505,10 @@ function renderMediaBin(): void {
     addButton.type = "button";
     addButton.className = "media-bin-add";
     addButton.innerHTML = iconMarkup("plus");
-    addButton.title = "Añadir otro clip de este archivo al final de la pista de vídeo superior";
+    addButton.title = entry.demuxed
+      ? "Añadir otro clip de este archivo al final de la pista de vídeo superior"
+      : "Archivo de solo audio: usa el botón de audio";
+    addButton.disabled = !entry.demuxed;
     addButton.addEventListener("click", () => addClipFromSource(sourceId));
 
     const addAudioButton = document.createElement("button");
@@ -4707,14 +4798,21 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
   try {
     for (const projectSource of project.sources) {
       const file = byId.get(projectSource.id)!;
-      const demuxed = await checkDecodable(await decodeAllSamples(file)).catch((error: unknown) => {
-        throw new Error(`${projectSource.fileName}: ${error instanceof Error ? error.message : String(error)}`);
-      });
-      const thumbnail = await generateThumbnail(demuxed).catch((error: unknown) => {
-        console.warn("No se pudo generar la miniatura del clip:", error);
-        return undefined;
-      });
+      // Fuentes de solo audio (mp3/wav importados): nada de vídeo que demuxar.
+      const demuxed =
+        projectSource.kind === "audio"
+          ? undefined
+          : await checkDecodable(await decodeAllSamples(file)).catch((error: unknown) => {
+              throw new Error(`${projectSource.fileName}: ${error instanceof Error ? error.message : String(error)}`);
+            });
+      const thumbnail = demuxed
+        ? await generateThumbnail(demuxed).catch((error: unknown) => {
+            console.warn("No se pudo generar la miniatura del clip:", error);
+            return undefined;
+          })
+        : undefined;
       const { audio, waveformPeaks } = await loadAudioForSource(file);
+      if (!demuxed && !audio) throw new Error(`${projectSource.fileName}: no se pudo decodificar el audio`);
       // Si ya sabíamos la ruta (por el proyecto guardado o por acabar de
       // releerlo por ruta), se conserva tal cual — getFilePathIfAvailable
       // no funcionaría sobre el File sintético que devuelve
@@ -4731,7 +4829,7 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
           ...(projectSource.width !== undefined ? { width: projectSource.width } : {}),
           ...(projectSource.height !== undefined ? { height: projectSource.height } : {}),
         },
-        demuxed,
+        ...(demuxed ? { demuxed } : {}),
         fileName: projectSource.fileName,
         ...(filePath ? { filePath } : {}),
         ...(thumbnail ? { thumbnail } : {}),

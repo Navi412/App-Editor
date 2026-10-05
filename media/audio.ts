@@ -16,6 +16,19 @@ import { sniffContainer } from "./samples";
  * con el primer fotograma de vídeo (alignAudioStart).
  */
 
+/**
+ * Archivos de solo audio que se importan como fuente propia (música,
+ * voz en off...) — ampliación pedida el 2026-10-05. decodeAudioData los
+ * decodifica todos de forma nativa.
+ */
+export const AUDIO_FILE_EXTENSIONS = [".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus", ".weba"];
+
+/** Por extensión o tipo MIME: ¿es un archivo de solo audio? (un .m4a/.mp4 sin vídeo también acaba aquí, ver addClipFromFile). */
+export function isAudioOnlyFile(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return file.type.startsWith("audio/") || AUDIO_FILE_EXTENSIONS.some((ext) => name.endsWith(ext));
+}
+
 /** Decodifica la pista de audio de un archivo a un AudioBuffer completo. undefined si el archivo no tiene audio (o no es decodificable). */
 export async function decodeAudioAsset(
   file: File,

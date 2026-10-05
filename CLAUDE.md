@@ -44,9 +44,9 @@ cada clip pegado a su vídeo:
 - **Pistas de audio con clips independientes**: ya no todo audio va
   forzosamente pegado a un clip de vídeo con el mismo `sourceId`. Una
   pista de audio lleva sus propios `Clip` (mismo tipo, sin vídeo
-  asociado) — hoy solo pueden contener audio de fuentes de vídeo ya
-  cargadas (importar un archivo de solo audio, p.ej. mp3, sigue fuera
-  de alcance salvo que se pida ampliarlo aparte).
+  asociado): audio de fuentes de vídeo ya cargadas o, desde el
+  2026-10-05, de archivos de solo audio importados (ver "Mejoras del
+  2026-10-05" más abajo).
 - **`Clip.startTicks`** sustituye el modelo "ripple" anterior (posición
   derivada de sumar las duraciones de los clips previos en el array):
   cada clip guarda su posición absoluta de inicio en su pista. Un
@@ -379,9 +379,26 @@ Siguen fuera: AVI, MPEG-PS (.mpg/.vob), FLV, WMV, y los códecs que
 WebCodecs no decodifica (MPEG-2, MPEG-4 Part 2/Xvid, ProRes, DNxHD) —
 se rechazan con un mensaje que lo dice, no se transcodifican.
 
+**Mejoras del 2026-10-05 — pedidas explícitamente** (el usuario pidió
+de una vez una lista de mejoras grandes, en el orden más favorable,
+mientras estaba fuera; cada una va en su propio commit):
+
+- **Audio del MP4 exportado arreglado.** `export/muxer.ts` creaba la
+  pista de audio sin `hdlr: "soun"` (mp4box usa "vide" por defecto) y
+  le pasaba timestamps en µs con una escala de tiempo = frecuencia de
+  muestreo. Los reproductores no reconocían el audio y
+  `decodeAudioData` rechazaba el archivo. Comprobado con ffprobe.
+- **Importar archivos de solo audio** (mp3, wav, ogg, flac, m4a, aac,
+  opus — `AUDIO_FILE_EXTENSIONS` en `media/audio.ts`), quitado de
+  "fuera de alcance". `SourceFile.kind === "audio"` (ya existía en
+  /core y en el formato de proyecto) y `SourceEntry.demuxed` pasa a ser
+  opcional en `ui/main.ts`. `addAudioOnlyFile` pone el clip al final
+  de la primera pista de audio; si el proyecto empieza por un audio, se
+  crea con una pista de vídeo vacía y salida 1920x1080 a 30 fps. Un
+  .mp4/.mkv sin vídeo también cae por esta vía.
+
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
-ampliarlo:** importar archivos
-de solo audio (mp3/wav) como fuente propia para una pista de audio,
+ampliarlo:**
 cambios de velocidad de reproducción de un CLIP (retiming/slow-motion
 — distinto del shuttle J/K/L de arriba, que es solo transporte de
 edición y no toca ningún dato del proyecto), roll edit, compositing

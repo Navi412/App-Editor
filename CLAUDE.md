@@ -504,6 +504,14 @@ mientras estaba fuera; cada una va en su propio commit):
   ◀ ▶ saltan entre keyframes. Comprobado que preview y export
   coinciden: imagen en imagen girada, fundido de opacidad y
   reproducción con las dos capas sincronizadas al fotograma.
+  Los keyframes se ven como rombos azules en la franja baja del clip de
+  vídeo (`TimelineHit.part === "transformKey"`): un clic lleva el
+  playhead al keyframe y arrastrarlo lo mueve en el tiempo
+  (`moveTransformKeyframe`, sin cruzar a sus vecinos). En el preview, con
+  el clip seleccionado y en pausa: arrastrar mueve, Mayús+arrastrar
+  escala y Alt+arrastrar gira (`beginClipTransformDragIfPossible`),
+  con el mismo guardado que los sliders. Si hay varias capas o el clip
+  está transformado, se enmarca con un recuadro discontinuo.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**

@@ -4,6 +4,7 @@ import { secondsToTicks } from "./time";
 import { splitClipAt } from "./timeline";
 import {
   clearTransformKeyframes,
+  moveTransformKeyframe,
   resolveVideoLayers,
   setClipTransformAt,
   toggleTransformKeyframe,
@@ -118,5 +119,18 @@ describe("transformación en el proyecto guardado", () => {
     const parsed = parseProjectFile(JSON.parse(JSON.stringify(serializeProject(tl, sources, [], []))));
     expect(parsed.tracks[1]!.clips[0]!.transformKeyframes).toEqual(tl.tracks[1]!.clips[0]!.transformKeyframes);
     expect(parsed.tracks[0]!.clips[0]!.transform).toEqual(tl.tracks[0]!.clips[0]!.transform);
+  });
+});
+
+describe("moveTransformKeyframe", () => {
+  it("mueve el keyframe sin cruzar a sus vecinos ni salirse del clip", () => {
+    let tl = toggleTransformKeyframe(layered(), "v2", "encima", t(1));
+    tl = toggleTransformKeyframe(tl, "v2", "encima", t(2));
+    tl = toggleTransformKeyframe(tl, "v2", "encima", t(3));
+    const offsets = (x: Timeline) => x.tracks[1]!.clips[0]!.transformKeyframes!.map((k) => k.offsetTicks);
+    expect(offsets(moveTransformKeyframe(tl, "v2", "encima", 1, t(2.5)))).toEqual([t(1), t(2.5), t(3)]);
+    expect(offsets(moveTransformKeyframe(tl, "v2", "encima", 1, t(9)))).toEqual([t(1), t(3) - 1, t(3)]);
+    expect(offsets(moveTransformKeyframe(tl, "v2", "encima", 0, -t(5)))).toEqual([0, t(2), t(3)]);
+    expect(offsets(moveTransformKeyframe(tl, "v2", "encima", 2, t(9)))).toEqual([t(1), t(2), t(4)]);
   });
 });

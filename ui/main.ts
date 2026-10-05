@@ -93,6 +93,7 @@ import { checkDecodable, decodeAllSamples, VIDEO_FILE_ACCEPT, type DemuxedTrack 
 import { toSourceFile } from "../media/sourceFile";
 import {
   clearTransformKeyframes,
+  moveTransformKeyframe,
   resolveVideoLayers,
   setClipTransformAt,
   toggleTransformKeyframe,
@@ -1040,6 +1041,7 @@ function composePreview(activeFrame: VideoFrame, ticks: number, requestLower: bo
     }
   }
   drawFrameFit(ctx, activeFrame, size, activeLook, previewGradeRenderer, false, top?.transform);
+  drawSelectedClipOutline(layers, size);
   if (textOverlays.length > 0) drawActiveTextOverlays(ticks);
   if (requestLower) requestLowerLayers(ticks, layers.slice(0, -1));
 }
@@ -1237,6 +1239,52 @@ tfResetButton.addEventListener("click", () => {
   void seekToTimelineTicks(playheadTicks);
   status.textContent = "Transformación restablecida.";
 });
+
+/**
+ * Rombo de keyframe de transformación en la timeline: un clic lleva el
+ * playhead a ese keyframe (y el panel Transformar a sus valores);
+ * arrastrarlo lo mueve en el tiempo (moveTransformKeyframe), un paso de
+ * historial al soltar.
+ */
+function beginTransformKeyDrag(event: PointerEvent, trackId: string, clipId: string, index: number): void {
+  if (!timeline) return;
+  event.preventDefault();
+  const dragStartTimeline = timeline;
+  const clip = dragStartTimeline.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+  const keyframe = clip?.transformKeyframes?.[index];
+  if (!clip || !keyframe) return;
+  selectClipRef(trackId, clipId);
+  const startClientX = event.clientX;
+  let moved = false;
+
+  function onMove(moveEvent: PointerEvent): void {
+    const dx = moveEvent.clientX - startClientX;
+    if (!moved && Math.abs(dx) <= CLIP_DRAG_CLICK_THRESHOLD_PX) return;
+    moved = true;
+    const offset = keyframe!.offsetTicks + secondsToTicks(dx / pixelsPerSecond);
+    timeline = moveTransformKeyframe(dragStartTimeline, trackId, clipId, index, offset);
+    requestTimelineDraw();
+    const placed = timeline.tracks.find((t) => t.id === trackId)!.clips.find((c) => c.id === clipId)!.transformKeyframes![index]!;
+    showFloatingTooltip(moveEvent.clientX, moveEvent.clientY, `Keyframe en ${formatRulerTime(ticksToSeconds(clip!.startTicks + placed.offsetTicks))}`);
+  }
+
+  function onUp(): void {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    hideFloatingTooltip();
+    const current = timeline?.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId);
+    const target = current?.transformKeyframes?.[index];
+    if (moved && timeline && timeline !== dragStartTimeline) {
+      pushHistory(snapshotWithTimeline(dragStartTimeline));
+      refreshTimelineLayout();
+      status.textContent = "Keyframe movido.";
+    }
+    if (current && target) void seekToTimelineTicks(current.startTicks + target.offsetTicks);
+  }
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
 
 /** Un paso de fotograma hacia delante (1) o hacia atrás (-1), según la frame rate de salida. */
 function stepFrame(direction: 1 | -1): void {
@@ -2133,6 +2181,10 @@ function handleTimelinePointerDown(event: PointerEvent): void {
   const isAudioRow = row.kind !== "video";
   const hasAudio = !!sources.get(clip.sourceId)?.waveformPeaks?.length;
 
+  if (hit.part === "transformKey" && hit.keyframeIndex !== undefined) {
+    beginTransformKeyDrag(event, trackId, clip.id, hit.keyframeIndex);
+    return;
+  }
   if (hit.part === "keyframe" && hit.keyframeIndex !== undefined) {
     if (event.altKey) {
       event.preventDefault();
@@ -2181,6 +2233,7 @@ timelineCanvas.addEventListener("pointermove", (event) => {
     else if (hit.clip?.kind === "transition") cursor = "ew-resize";
     else if (hit.part === "trimLeft" || hit.part === "trimRight") cursor = "ew-resize";
     else if (hit.part === "volumeLine" || hit.part === "keyframe") cursor = "ns-resize";
+    else if (hit.part === "transformKey") cursor = "ew-resize";
     else if (hit.clip) cursor = event.altKey && hit.row.kind === "video" ? "col-resize" : "grab";
     else cursor = "crosshair";
   }
@@ -4502,22 +4555,111 @@ function beginTextOverlayDrag(overlay: TextOverlay, startPoint: { x: number; y: 
 }
 
 canvas.addEventListener("pointerdown", (event) => {
-  if (!timeline || textOverlays.length === 0) return;
+  if (!timeline) return;
   const point = canvasPointFromEvent(event);
 
-  const rotateTarget = hitTestRotateHandle(point);
-  if (rotateTarget) {
-    event.preventDefault();
-    beginTextOverlayRotateDrag(rotateTarget);
-    return;
+  if (textOverlays.length > 0) {
+    const rotateTarget = hitTestRotateHandle(point);
+    if (rotateTarget) {
+      event.preventDefault();
+      beginTextOverlayRotateDrag(rotateTarget);
+      return;
+    }
+    const overlay = hitTestOverlay(point);
+    if (overlay) {
+      event.preventDefault();
+      selectTextOverlay(overlay.id);
+      beginTextOverlayDrag(overlay, point);
+      return;
+    }
   }
 
-  const overlay = hitTestOverlay(point);
-  if (!overlay) return;
-  event.preventDefault();
-  selectTextOverlay(overlay.id);
-  beginTextOverlayDrag(overlay, point);
+  // Sin texto debajo: con un clip de vídeo seleccionado y visible en el
+  // playhead, se transforma arrastrando (mejora del 2026-10-05).
+  beginClipTransformDragIfPossible(event, point);
 });
+
+/** El clip seleccionado, si es de vídeo y se ve ahora mismo en el preview (en pausa). */
+function selectedVisibleClipLayer(): VideoLayer | undefined {
+  const tl = timelineForPreview();
+  if (!tl || !selectedClip || activeSegment) return undefined;
+  return resolveVideoLayers(tl, playheadTicks).find(
+    (layer) => layer.trackId === selectedClip!.trackId && layer.clip.id === selectedClip!.clipId && layer.clip.kind === "clip",
+  );
+}
+
+/**
+ * Arrastrar en el preview el clip seleccionado: mueve; con Mayús escala
+ * (arriba agranda); con Alt gira. Vista previa en vivo (liveTransform,
+ * sin decodificar) y guardado al soltar, como los sliders del panel
+ * Transformar (con animación, crea o ajusta el keyframe del playhead).
+ */
+function beginClipTransformDragIfPossible(event: PointerEvent, start: { x: number; y: number }): void {
+  const layer = selectedVisibleClipLayer();
+  if (!layer || !timeline) return;
+  event.preventDefault();
+  const { trackId } = selectedClip!;
+  const clip = layer.clip;
+  const base = layer.transform;
+  const mode = event.shiftKey ? "scale" : event.altKey ? "rotate" : "move";
+  const size = timeline.outputResolution;
+  let latest = base;
+
+  function onMove(moveEvent: PointerEvent): void {
+    const point = canvasPointFromEvent(moveEvent);
+    const dx = point.x - start.x;
+    const dy = point.y - start.y;
+    if (mode === "move") latest = { ...base, x: base.x + dx / size.width, y: base.y + dy / size.height };
+    else if (mode === "scale") latest = { ...base, scale: Math.max(0.05, Math.min(4, base.scale * Math.exp(-dy / 200))) };
+    else latest = { ...base, rotation: Math.max(-180, Math.min(180, base.rotation + dx / 2)) };
+    liveTransform = { clipId: clip.id, transform: latest };
+    for (const field of TRANSFORM_FIELDS) transformInputs[field].value = String(latest[field]);
+    refreshTransformOutputs();
+    redrawComposite(true);
+  }
+
+  function onUp(): void {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    liveTransform = undefined;
+    if (!timeline || latest === base) {
+      redrawComposite();
+      return;
+    }
+    commitTimeline(setClipTransformAt(timeline, trackId, clip.id, playheadOffsetIn(clip), latest));
+    refreshTimelineLayout();
+    syncTransformPanel();
+    void seekToTimelineTicks(playheadTicks);
+    status.textContent = mode === "move" ? "Clip movido en el encuadre." : mode === "scale" ? "Clip escalado." : "Clip girado.";
+  }
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/** Recuadro discontinuo del clip seleccionado en el preview (solo en pausa), con su transformación. */
+function drawSelectedClipOutline(layers: VideoLayer[], size: Resolution): void {
+  if (activeSegment || !selectedClip) return;
+  const layer = layers.find((l) => l.trackId === selectedClip!.trackId && l.clip.id === selectedClip!.clipId);
+  const entry = layer ? sources.get(layer.sourceId) : undefined;
+  if (!layer || layer.clip.kind !== "clip" || !entry?.sourceFile.width || !entry.sourceFile.height) return;
+  // Solo si hay más de una capa o el clip está transformado: en el caso
+  // de siempre (pantalla completa) el recuadro solo estorba.
+  const t = layer.transform;
+  if (layers.length < 2 && t.x === 0 && t.y === 0 && t.scale === 1 && t.rotation === 0 && t.opacity === 1) return;
+  const fit = Math.min(size.width / entry.sourceFile.width, size.height / entry.sourceFile.height);
+  const w = entry.sourceFile.width * fit;
+  const h = entry.sourceFile.height * fit;
+  ctx.save();
+  ctx.translate(size.width / 2 + t.x * size.width, size.height / 2 + t.y * size.height);
+  ctx.rotate((t.rotation * Math.PI) / 180);
+  ctx.scale(t.scale, t.scale);
+  ctx.lineWidth = 2 / t.scale;
+  ctx.setLineDash([8 / t.scale, 6 / t.scale]);
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.strokeRect(-w / 2, -h / 2, w, h);
+  ctx.restore();
+}
 
 // --- Marcadores ---
 

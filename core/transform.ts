@@ -205,3 +205,28 @@ export function resolveVideoLayers(timeline: Timeline, timelineTicks: number): V
   }
   return layers.reverse();
 }
+
+/**
+ * Mueve en el tiempo el keyframe `index` de la animación de un clip, sin
+ * pasar a sus vecinos (se queda entre el anterior y el siguiente) ni
+ * salirse del clip.
+ */
+export function moveTransformKeyframe(
+  timeline: Timeline,
+  trackId: string,
+  clipId: string,
+  index: number,
+  newOffsetTicks: number,
+): Timeline {
+  return updateClip(timeline, trackId, clipId, (clip) => {
+    const keyframes = clip.transformKeyframes ?? [];
+    const keyframe = keyframes[index];
+    if (!keyframe) return clip;
+    const min = index > 0 ? keyframes[index - 1]!.offsetTicks + 1 : 0;
+    const max = index < keyframes.length - 1 ? keyframes[index + 1]!.offsetTicks - 1 : clipDurationTicks(clip);
+    const offsetTicks = Math.max(min, Math.min(max, Math.round(newOffsetTicks)));
+    const next = [...keyframes];
+    next[index] = { ...keyframe, offsetTicks };
+    return { ...clip, transformKeyframes: next };
+  });
+}

@@ -114,7 +114,7 @@ export interface TimelineViewState {
   source: (sourceId: string) => SourceVisual | undefined;
 }
 
-export type ClipPart = "body" | "trimLeft" | "trimRight" | "volumeLine" | "keyframe";
+export type ClipPart = "body" | "trimLeft" | "trimRight" | "volumeLine" | "keyframe" | "transformKey";
 
 export type TimelineHit =
   | { area: "ruler"; ticks: number }
@@ -152,6 +152,9 @@ const FONT = "-apple-system, 'Segoe UI', sans-serif";
 const VOLUME_COLOR = "#e07a00";
 const WAVEFORM_COLOR = "#3f74d6";
 const FLAG_COLOR = "#f5a623";
+const TRANSFORM_KEY_COLOR = "#2f6bff";
+/** Distancia desde el borde inferior del clip a la que se pintan los rombos de keyframes de transformación. */
+const TRANSFORM_KEY_INSET_PX = 9;
 const TRANSITION_A = "#7b5cc4";
 const TRANSITION_B = "#6a4ab0";
 
@@ -303,6 +306,18 @@ export class TimelineCanvasView {
       if (x < x0 || x >= x1) continue;
       if (clip.kind === "transition") return { area: "row", row, ticks, clip, part: "body" };
 
+      if (row.kind === "video") {
+        // Rombos de los keyframes de transformación, en la franja de abajo del clip.
+        const transformKeys = clip.transformKeyframes ?? [];
+        const duration = clipDurationTicks(clip) || 1;
+        const diamondY = top + row.height - TRANSFORM_KEY_INSET_PX;
+        for (let k = 0; k < transformKeys.length; k++) {
+          const kx = x0 + (transformKeys[k]!.offsetTicks / duration) * (x1 - x0);
+          if (Math.abs(x - kx) <= KEYFRAME_HIT_PX && Math.abs(y - diamondY) <= KEYFRAME_HIT_PX) {
+            return { area: "row", row, ticks, clip, part: "transformKey", keyframeIndex: k };
+          }
+        }
+      }
       if (row.kind !== "video") {
         const keyframes = clip.volumeKeyframes ?? [];
         const duration = clipDurationTicks(clip) || 1;
@@ -527,6 +542,28 @@ export class TimelineCanvasView {
     if (clip.flagged) {
       ctx.fillStyle = FLAG_COLOR;
       ctx.fillRect(x0, y, w, 4);
+    }
+
+    // Keyframes de transformación: rombos en la franja de abajo.
+    const transformKeys = clip.kind === "clip" ? (clip.transformKeyframes ?? []) : [];
+    if (transformKeys.length > 0) {
+      const duration = clipDurationTicks(clip) || 1;
+      const diamondY = y + h - TRANSFORM_KEY_INSET_PX + 1;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "#fff";
+      ctx.fillStyle = TRANSFORM_KEY_COLOR;
+      for (const keyframe of transformKeys) {
+        const kx = x0 + (keyframe.offsetTicks / duration) * w;
+        if (kx < -8 || kx > W + 8) continue;
+        ctx.beginPath();
+        ctx.moveTo(kx, diamondY - 5);
+        ctx.lineTo(kx + 5, diamondY);
+        ctx.lineTo(kx, diamondY + 5);
+        ctx.lineTo(kx - 5, diamondY);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
     }
 
     // Texto pegado al borde izquierdo VISIBLE (si el clip empieza fuera

@@ -425,6 +425,19 @@ mientras estaba fuera; cada una va en su propio commit):
   codificadores retrasan los cts y lo compensan con `media_time` en la
   elst; sin aplicarlo, el vídeo de casi cualquier MP4 H.264 iba unos
   fotogramas por detrás del audio.
+- **Autoguardado y recuperación** (`ui/main.ts`, "Autoguardado"). Cada
+  4 s, si el proyecto cambió, se guarda el mismo JSON de "Guardar
+  proyecto" en `localStorage` (`appVideo.autosave`, por equipo, con
+  fecha y nombre). Al abrir la app vacía, un `<dialog>` ofrece
+  Recuperar/Descartar. Recuperar pasa por `openParsedProject`, el mismo
+  camino que abrir un .json.
+- **Reenlazar archivos que faltan** (`#relink-modal`). Antes había que
+  re-seleccionar TODOS los que faltaban a la vez y con el mismo nombre
+  exacto; ahora cada uno tiene su botón Buscar… (cualquier nombre o
+  carpeta), o "Seleccionar varios…" empareja por nombre (y si es un solo
+  archivo para un solo hueco, lo acepta aunque el nombre no coincida).
+  `applyPendingProject` recibe `sourceId → File`; si la duración del
+  archivo reenlazado no cuadra con la guardada (>0,5 s), lo avisa.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**

@@ -1405,7 +1405,8 @@ kbd {
    2026-08-29). `<dialog>` nativo: trae backdrop y cierre con Escape
    gratis. --- */
 
-dialog#shortcuts-modal {
+dialog#shortcuts-modal,
+dialog.app-modal {
   background: var(--surface);
   color: var(--text);
   border: none;
@@ -1415,7 +1416,12 @@ dialog#shortcuts-modal {
   width: min(420px, 90vw);
 }
 
-dialog#shortcuts-modal::backdrop {
+dialog.app-modal {
+  width: min(480px, 92vw);
+}
+
+dialog#shortcuts-modal::backdrop,
+dialog.app-modal::backdrop {
   background: var(--modal-backdrop);
 }
 
@@ -1432,6 +1438,68 @@ dialog#shortcuts-modal::backdrop {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-dim);
+}
+
+.modal-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 0 0 1rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+/* Lista de archivos a reenlazar: nombre + estado + botón Buscar. */
+.relink-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.relink-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 12px;
+  box-shadow: var(--nm-inset-sm);
+}
+
+.relink-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.relink-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relink-state {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relink-item--found .relink-state {
+  color: var(--accent);
 }
 
 .modal-close {

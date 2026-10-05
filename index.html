@@ -563,6 +563,39 @@
 
     <div id="scrub-tooltip" class="scrub-tooltip" hidden></div>
 
+    <!-- Recuperar la última sesión (autoguardado en localStorage, ver
+         "Autoguardado" en ui/main.ts). Se ofrece al abrir la app vacía. -->
+    <dialog id="recovery-modal" class="app-modal">
+      <div class="modal-header">
+        <h2>Recuperar proyecto</h2>
+      </div>
+      <p class="modal-text" id="recovery-text"></p>
+      <div class="modal-actions">
+        <button id="recovery-discard" type="button">Descartar</button>
+        <button id="recovery-restore" type="button" class="primary">Recuperar</button>
+      </div>
+    </dialog>
+
+    <!-- Reenlazar archivos que faltan al abrir un proyecto: uno a uno
+         (aunque tengan otro nombre o estén en otra carpeta) o varios a la
+         vez emparejados por nombre. -->
+    <dialog id="relink-modal" class="app-modal">
+      <div class="modal-header">
+        <h2>Archivos que faltan</h2>
+        <button id="relink-close" type="button" class="modal-close" data-icon="x" title="Cancelar"></button>
+      </div>
+      <p class="modal-text">
+        No se encontraron estos archivos del proyecto. Búscalos uno a uno (pueden tener otro nombre o
+        estar en otra carpeta) o selecciona varios a la vez para emparejarlos por nombre.
+      </p>
+      <ul id="relink-list" class="relink-list"></ul>
+      <div class="modal-actions">
+        <button id="relink-multi" type="button">Seleccionar varios…</button>
+        <button id="relink-apply" type="button" class="primary" disabled>Abrir proyecto</button>
+      </div>
+      <input id="relink-single-input" type="file" hidden />
+    </dialog>
+
     <dialog id="shortcuts-modal">
       <div class="modal-header">
         <h2>Atajos de teclado</h2>

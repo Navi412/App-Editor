@@ -205,6 +205,16 @@ const appMenuButton = requireElement<HTMLButtonElement>("#app-menu-button");
 const appMenuDropdown = requireElement<HTMLDivElement>("#app-menu-dropdown");
 const projectNameLabel = requireElement<HTMLSpanElement>("#project-name");
 const shortcutsModal = requireElement<HTMLDialogElement>("#shortcuts-modal");
+const recoveryModal = requireElement<HTMLDialogElement>("#recovery-modal");
+const recoveryText = requireElement<HTMLParagraphElement>("#recovery-text");
+const recoveryRestoreButton = requireElement<HTMLButtonElement>("#recovery-restore");
+const recoveryDiscardButton = requireElement<HTMLButtonElement>("#recovery-discard");
+const relinkModal = requireElement<HTMLDialogElement>("#relink-modal");
+const relinkList = requireElement<HTMLUListElement>("#relink-list");
+const relinkApplyButton = requireElement<HTMLButtonElement>("#relink-apply");
+const relinkMultiButton = requireElement<HTMLButtonElement>("#relink-multi");
+const relinkCloseButton = requireElement<HTMLButtonElement>("#relink-close");
+const relinkSingleInput = requireElement<HTMLInputElement>("#relink-single-input");
 const closeShortcutsModalButton = requireElement<HTMLButtonElement>("#close-shortcuts-modal");
 const previewZoomLabel = requireElement<HTMLSpanElement>("#preview-zoom-label");
 const gradeLiftRInput = requireElement<HTMLInputElement>("#grade-lift-r");
@@ -4706,6 +4716,94 @@ saveProjectButton.addEventListener("click", () => {
   projectStatus.appendChild(link);
 });
 
+// --- Autoguardado y recuperación — mejora pedida el 2026-10-05 ---
+// Cada pocos segundos, si el proyecto ha cambiado, se guarda en
+// localStorage (el mismo JSON que "Guardar proyecto", sin los vídeos).
+// Al abrir la app vacía, si hay uno, se ofrece recuperarlo: tras un
+// cierre inesperado (o simplemente cerrar sin guardar) no se pierde el
+// trabajo. En Electron las fuentes se reabren solas por su ruta; en el
+// navegador se piden con el diálogo de reenlazar.
+
+const AUTOSAVE_KEY = "appVideo.autosave";
+const AUTOSAVE_INTERVAL_MS = 4000;
+
+interface AutosaveRecord {
+  savedAt: string;
+  projectName: string;
+  project: unknown;
+}
+
+/** Último JSON escrito: para no reescribir localStorage si nada cambió. */
+let lastAutosaveJson = "";
+
+function autosaveNow(): void {
+  if (!timeline || sources.size === 0) return;
+  const project = serializeProject(timeline, collectProjectSources(), markers, textOverlays);
+  const json = JSON.stringify(project);
+  if (json === lastAutosaveJson) return;
+  const record: AutosaveRecord = {
+    savedAt: new Date().toISOString(),
+    projectName: projectNameLabel.hidden ? "" : (projectNameLabel.textContent ?? ""),
+    project,
+  };
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(record));
+    lastAutosaveJson = json;
+  } catch (error) {
+    // Cuota llena (p.ej. muchas LUT) o almacenamiento bloqueado: no es grave, se reintenta en la siguiente vuelta.
+    console.warn("No se pudo autoguardar el proyecto:", error);
+  }
+}
+
+function readAutosave(): AutosaveRecord | undefined {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if (!raw) return undefined;
+    const record = JSON.parse(raw) as AutosaveRecord;
+    return typeof record.savedAt === "string" && record.project ? record : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function discardAutosave(): void {
+  try {
+    localStorage.removeItem(AUTOSAVE_KEY);
+  } catch {
+    /* almacenamiento bloqueado: nada que borrar */
+  }
+}
+
+/** Al arrancar con la app vacía: si hay una sesión autoguardada, se ofrece recuperarla. */
+function offerAutosaveRecovery(): void {
+  const record = readAutosave();
+  if (!record || timeline) return;
+  let parsed: ProjectFile;
+  try {
+    parsed = parseProjectFile(record.project);
+  } catch {
+    discardAutosave(); // de una versión incompatible o corrupto: no sirve de nada ofrecerlo
+    return;
+  }
+  const when = new Date(record.savedAt).toLocaleString("es-ES", { dateStyle: "medium", timeStyle: "short" });
+  const clipCount = parsed.tracks.reduce((sum, track) => sum + track.clips.length, 0);
+  recoveryText.textContent =
+    `Hay un proyecto de la última sesión${record.projectName ? ` («${record.projectName}»)` : ""}, guardado ` +
+    `automáticamente el ${when}: ${parsed.sources.length} archivo(s), ${clipCount} clip(s). ¿Quieres recuperarlo?`;
+  recoveryRestoreButton.onclick = () => {
+    recoveryModal.close();
+    void openParsedProject(parsed, record.projectName || "Proyecto recuperado");
+  };
+  recoveryDiscardButton.onclick = () => {
+    recoveryModal.close();
+    discardAutosave();
+  };
+  recoveryModal.showModal();
+}
+
+window.setInterval(autosaveNow, AUTOSAVE_INTERVAL_MS);
+window.addEventListener("beforeunload", autosaveNow);
+
 let pendingProject: ProjectFile | undefined;
 /** Fuentes encontradas por su ruta guardada (sin intervención del usuario) para el `pendingProject` actual: sourceId → ruta — ver handleProjectFileSelected. Vacío si no hay puente de Electron o ninguna fuente tenía `filePath`. Solo la ruta: el archivo se lee después, bajo demanda. */
 let pendingAutoResolvedSources: Map<string, string> = new Map();
@@ -4740,30 +4838,118 @@ async function autoResolveProjectSources(sources: ProjectSource[]): Promise<Map<
 async function handleProjectFileSelected(file: File): Promise<void> {
   try {
     const text = await file.text();
-    const parsed = parseProjectFile(JSON.parse(text));
-    setProjectName(file.name);
-    pendingProject = parsed;
-    pendingAutoResolvedSources = await autoResolveProjectSources(parsed.sources);
-
-    const missing = parsed.sources.filter((source) => !pendingAutoResolvedSources.has(source.id));
-    if (missing.length === 0) {
-      await applyPendingProject(parsed, []);
-      return;
-    }
-    const names = missing.map((source) => source.fileName).join(", ");
-    projectStatus.textContent = `Proyecto leído. Vuelve a seleccionar estos archivos (mismo nombre): ${names}`;
-    projectSourcesInput.click();
+    await openParsedProject(parseProjectFile(JSON.parse(text)), file.name);
   } catch (error) {
     console.error(error);
     projectStatus.textContent = `Error al leer el proyecto: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
+/** Abre un proyecto ya leído (de un .json o del autoguardado): las fuentes que se encuentren por ruta se usan sin preguntar; las demás se reenlazan (ver "Reenlazar"). */
+async function openParsedProject(parsed: ProjectFile, name: string): Promise<void> {
+  setProjectName(name);
+  pendingProject = parsed;
+  pendingAutoResolvedSources = await autoResolveProjectSources(parsed.sources);
+  const missing = parsed.sources.filter((source) => !pendingAutoResolvedSources.has(source.id));
+  if (missing.length === 0) {
+    await applyPendingProject(parsed, new Map());
+    return;
+  }
+  openRelinkModal(missing);
+}
+
+// --- Reenlazar archivos que faltan — mejora pedida el 2026-10-05 ---
+// Antes había que volver a seleccionar TODOS los archivos que faltaban de
+// una vez y con el mismo nombre exacto; si uno se había renombrado o
+// movido, no había forma de abrir el proyecto. Ahora cada uno se puede
+// buscar por separado (cualquier nombre/carpeta), o varios a la vez
+// emparejados por nombre como antes.
+
+let relinkMissing: ProjectSource[] = [];
+const relinkFiles = new Map<string, File>();
+let relinkTargetId: string | undefined;
+
+function openRelinkModal(missing: ProjectSource[]): void {
+  relinkMissing = missing;
+  relinkFiles.clear();
+  renderRelinkList();
+  projectStatus.textContent = `Faltan ${missing.length} archivo(s) del proyecto.`;
+  if (!relinkModal.open) relinkModal.showModal();
+}
+
+function renderRelinkList(): void {
+  relinkList.innerHTML = "";
+  for (const source of relinkMissing) {
+    const found = relinkFiles.get(source.id);
+    const li = document.createElement("li");
+    li.className = `relink-item${found ? " relink-item--found" : ""}`;
+    const info = document.createElement("div");
+    info.className = "relink-info";
+    const name = document.createElement("span");
+    name.className = "relink-name";
+    name.textContent = source.fileName;
+    name.title = source.filePath ?? source.fileName;
+    const state = document.createElement("span");
+    state.className = "relink-state";
+    state.textContent = found
+      ? found.name === source.fileName
+        ? "Encontrado"
+        : `Se usará: ${found.name}`
+      : source.filePath
+        ? `No está en ${source.filePath}`
+        : "Sin localizar";
+    info.append(name, state);
+    const find = document.createElement("button");
+    find.type = "button";
+    find.textContent = found ? "Cambiar…" : "Buscar…";
+    find.addEventListener("click", () => {
+      relinkTargetId = source.id;
+      relinkSingleInput.accept = source.kind === "audio" ? MEDIA_FILE_ACCEPT : VIDEO_FILE_ACCEPT;
+      relinkSingleInput.click();
+    });
+    li.append(info, find);
+    relinkList.appendChild(li);
+  }
+  relinkApplyButton.disabled = relinkMissing.some((source) => !relinkFiles.has(source.id));
+}
+
+relinkSingleInput.addEventListener("change", () => {
+  const file = relinkSingleInput.files?.[0];
+  relinkSingleInput.value = "";
+  if (!file || !relinkTargetId) return;
+  relinkFiles.set(relinkTargetId, file);
+  relinkTargetId = undefined;
+  renderRelinkList();
+});
+
+relinkMultiButton.addEventListener("click", () => projectSourcesInput.click());
+
 projectSourcesInput.addEventListener("change", () => {
   const files = Array.from(projectSourcesInput.files ?? []);
   projectSourcesInput.value = "";
   if (!pendingProject || files.length === 0) return;
-  void applyPendingProject(pendingProject, files);
+  const byName = new Map(files.map((file) => [file.name, file]));
+  for (const source of relinkMissing) {
+    const match = byName.get(source.fileName);
+    if (match) relinkFiles.set(source.id, match);
+  }
+  // Un solo archivo para un solo hueco: se toma aunque el nombre no coincida.
+  const stillMissing = relinkMissing.filter((source) => !relinkFiles.has(source.id));
+  if (files.length === 1 && stillMissing.length === 1 && !relinkFiles.has(stillMissing[0]!.id)) {
+    relinkFiles.set(stillMissing[0]!.id, files[0]!);
+  }
+  renderRelinkList();
+});
+
+relinkApplyButton.addEventListener("click", () => {
+  if (!pendingProject) return;
+  relinkModal.close();
+  void applyPendingProject(pendingProject, new Map(relinkFiles));
+});
+
+relinkCloseButton.addEventListener("click", () => {
+  relinkModal.close();
+  projectStatus.textContent = "Apertura del proyecto cancelada.";
 });
 
 /** `manualFiles` son solo los que el usuario acaba de re-seleccionar a mano (emparejados por nombre); los que ya se resolvieron por ruta guardada están en `pendingAutoResolvedSources` (ver handleProjectFileSelected) y se fusionan aquí por sourceId. */
@@ -4777,20 +4963,16 @@ function nextFreeIdNumber(ids: string[]): number {
   return max + 1;
 }
 
-async function applyPendingProject(project: ProjectFile, manualFiles: File[]): Promise<void> {
-  const manualByName = new Map(manualFiles.map((file) => [file.name, file]));
+async function applyPendingProject(project: ProjectFile, manualById: Map<string, File>): Promise<void> {
   const byId = new Map<string, File | string>(pendingAutoResolvedSources);
-  const missing: ProjectSource[] = [];
-  for (const source of project.sources) {
-    if (byId.has(source.id)) continue;
-    const manual = manualByName.get(source.fileName);
-    if (manual) byId.set(source.id, manual);
-    else missing.push(source);
-  }
+  for (const [id, file] of manualById) byId.set(id, file);
+  const missing = project.sources.filter((source) => !byId.has(source.id));
   if (missing.length > 0) {
-    projectStatus.textContent = `Faltan archivos: ${missing.map((s) => s.fileName).join(", ")}. Selecciónalos todos a la vez.`;
+    openRelinkModal(missing);
     return;
   }
+  /** Archivos reenlazados cuya duración no cuadra con la guardada: probablemente no son el mismo. */
+  const durationWarnings: string[] = [];
 
   stopPlayback();
   projectStatus.textContent = "Cargando archivos del proyecto...";
@@ -4829,7 +5011,17 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
       // readFileFromPath. Solo se intenta capturar una ruta NUEVA para
       // archivos re-seleccionados a mano (File real de un <input>), así
       // la próxima recarga también los resuelve solos.
-      const filePath = projectSource.filePath ?? (typeof resolved === "string" ? resolved : getFilePathIfAvailable(resolved));
+      // Un archivo reenlazado a mano manda sobre la ruta guardada (que ya no existe).
+      const filePath =
+        typeof resolved === "string" ? resolved : (getFilePathIfAvailable(resolved) ?? projectSource.filePath);
+      const actualDurationTicks = demuxed
+        ? toSourceFile(projectSource.id, demuxed).durationTicks
+        : audio
+          ? secondsToTicks(audio.duration)
+          : projectSource.durationTicks;
+      if (Math.abs(actualDurationTicks - projectSource.durationTicks) > secondsToTicks(0.5)) {
+        durationWarnings.push(file.name);
+      }
       newSources.set(projectSource.id, {
         sourceFile: {
           id: projectSource.id,
@@ -4840,7 +5032,8 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
           ...(projectSource.height !== undefined ? { height: projectSource.height } : {}),
         },
         ...(demuxed ? { demuxed } : {}),
-        fileName: projectSource.fileName,
+        // Si se reenlazó a otro nombre, se muestra el nombre real a partir de ahora.
+        fileName: typeof resolved === "string" ? projectSource.fileName : resolved.name,
         ...(filePath ? { filePath } : {}),
         ...(thumbnail ? { thumbnail } : {}),
         ...(audio ? { audio } : {}),
@@ -4914,5 +5107,12 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
   if (selectedClip) selectClipRef(selectedClip.trackId, selectedClip.clipId);
   await seekToTimelineTicks(0);
   renderMediaBin();
-  projectStatus.textContent = "Proyecto cargado.";
+  projectStatus.textContent =
+    durationWarnings.length > 0
+      ? `Proyecto cargado. Ojo: la duración de ${durationWarnings.join(", ")} no coincide con la guardada — puede que no sea el mismo archivo.`
+      : "Proyecto cargado.";
+  lastAutosaveJson = ""; // que el autoguardado recoja ya el proyecto recién abierto
 }
+
+// Al final del módulo: todo lo que usa la recuperación (diálogos, abrir proyecto) ya existe.
+offerAutosaveRecovery();

@@ -31,6 +31,8 @@ export function createMp4Muxer(options: Mp4MuxerOptions): Mp4Muxer {
   const isoFile: ISOFile = createFile();
   let videoTrackId: number | undefined;
   let audioTrackId: number | undefined;
+  /** Timescale de la pista de audio (= su frecuencia de muestreo). */
+  let audioTimescale = 0;
 
   function ensureVideoTrack(description: ArrayBuffer): number {
     if (videoTrackId !== undefined) return videoTrackId;
@@ -56,6 +58,9 @@ export function createMp4Muxer(options: Mp4MuxerOptions): Mp4Muxer {
     const id = isoFile.addTrack({
       timescale: sampleRate,
       type: "mp4a",
+      // Sin esto mp4box declara la pista como "vide" (su valor por
+      // defecto): reproductores y decodeAudioData la tomaban por vídeo.
+      hdlr: "soun",
       name: "App Video export — audio",
       channel_count: channelCount,
       samplerate: sampleRate,
@@ -66,6 +71,7 @@ export function createMp4Muxer(options: Mp4MuxerOptions): Mp4Muxer {
       throw new Error("mp4box.js no pudo crear la pista de audio de salida (¿códec no soportado?)");
     }
     audioTrackId = id;
+    audioTimescale = sampleRate;
     return id;
   }
 
@@ -103,10 +109,16 @@ export function createMp4Muxer(options: Mp4MuxerOptions): Mp4Muxer {
 
       const data = new Uint8Array(chunk.byteLength);
       chunk.copyTo(data);
+      // La pista de audio va en la escala de su frecuencia de muestreo
+      // (como cualquier MP4 de AAC), pero WebCodecs da timestamp/duración
+      // en microsegundos. Antes se pasaban tal cual: el audio quedaba
+      // declarado ~20 veces más largo de lo que era y con duración 0, y
+      // decodeAudioData (entre otros) rechazaba el archivo exportado.
+      const toTrackUnits = (us: number) => Math.round((us * audioTimescale) / 1_000_000);
       isoFile.addSample(audioTrackId, data, {
-        duration: chunk.duration ?? 0,
-        cts: chunk.timestamp,
-        dts: chunk.timestamp,
+        duration: toTrackUnits(chunk.duration ?? 0),
+        cts: toTrackUnits(chunk.timestamp),
+        dts: toTrackUnits(chunk.timestamp),
         is_sync: true, // AAC: todas las muestras son autocontenidas
       });
     },

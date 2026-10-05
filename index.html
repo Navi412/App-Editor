@@ -39,7 +39,7 @@
         <label class="button-like" for="file-input" title="Abrir un vídeo">
           <span data-icon="folderOpen"></span> Abrir vídeo
         </label>
-        <input id="file-input" type="file" accept="video/mp4" hidden />
+        <input id="file-input" type="file" accept="video/*" hidden />
       </div>
 
       <div class="toolbar-group">
@@ -57,7 +57,7 @@
       <button id="save-project-button" type="button" disabled title="Guardar proyecto" hidden>Guardar</button>
       <button id="load-project-button" type="button" title="Cargar proyecto" hidden>Cargar</button>
       <input id="project-file-input" type="file" accept="application/json,.json" hidden />
-      <input id="project-sources-input" type="file" accept="video/mp4" multiple hidden />
+      <input id="project-sources-input" type="file" accept="video/*" multiple hidden />
 
       <span class="hint">Arrastra un clip para moverlo · arrastra sus bordes para recortar · Ctrl+rueda para zoom</span>
 
@@ -128,7 +128,7 @@
           <label class="drop-zone" id="drop-zone" for="file-input">
             <span data-icon="upload"></span>
             <strong>Arrastra un vídeo aquí</strong>
-            <span>o haz clic para elegir un archivo (.mp4)</span>
+            <span>o haz clic para elegir un archivo (MP4, MOV, MKV, WebM, TS…)</span>
           </label>
         </div>
         <div class="transport">

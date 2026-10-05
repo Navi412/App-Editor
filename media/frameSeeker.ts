@@ -1,6 +1,5 @@
-import { getDecoderDescription } from "./description";
 import { sampleDurationUs, sampleTimestampUs } from "./sampleTime";
-import type { DemuxedTrack } from "./samples";
+import { baseDecoderConfig, isHevcCodec, type DemuxedTrack } from "./samples";
 import { yieldToTaskQueue } from "./scheduling";
 
 /**
@@ -37,7 +36,6 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
   if (!firstSample) {
     throw new Error("La pista de vídeo no tiene fotogramas");
   }
-  const decoderDescription = getDecoderDescription(firstSample);
 
   // Orden de presentación, solo para localizar qué muestra corresponde
   // a timeUs — decodificar siempre respeta el orden de decodificación
@@ -77,8 +75,7 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
     },
   });
   decoder.configure({
-    codec: videoTrack.codec,
-    description: decoderDescription,
+    ...baseDecoderConfig(demuxed),
     // "prefer-software", no "prefer-hardware": este decoder es de
     // usar-y-tirar (exportación secuencial, miniaturas, fotogramas fijos
     // de transición) y puede convivir con el decoder EN VIVO de
@@ -86,10 +83,9 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
     // las sesiones de decodificación por hardware simultáneas — con una
     // CPU moderna de bastantes núcleos, software es más rápido aquí que
     // esperar (o competir por) una sesión de hardware ya ocupada.
-    hardwareAcceleration: "prefer-software",
-    ...(videoTrack.video
-      ? { codedWidth: videoTrack.video.width, codedHeight: videoTrack.video.height }
-      : {}),
+    // Excepción: HEVC. Chromium no trae decodificador HEVC por software
+    // (solo el de la GPU/SO), así que forzarlo haría fallar el configure.
+    hardwareAcceleration: isHevcCodec(videoTrack.codec) ? "no-preference" : "prefer-software",
   });
 
   let nextIndex = 0;
@@ -100,6 +96,10 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
   // media/player.ts). Los fotogramas que esto vuelve a producir son
   // duplicados de los ya mostrados; el frame-hold de next() los descarta.
   let needsKeyframe = false;
+  // El último fotograma entregado, retenido para el frame-hold: si la
+  // salida va a más fps que la fuente, varias llamadas seguidas caen en
+  // el mismo fotograma y cada una recibe un clone() de este.
+  let held: VideoFrame | undefined;
 
   function primeIfNeeded(): void {
     if (!needsKeyframe) return;
@@ -156,7 +156,15 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
       nextIndex++;
     }
 
-    const targetReady = () => pending.some((frame) => frame.timestamp <= effectiveTimeUs);
+    // Hay que esperar al fotograma OBJETIVO, no a cualquiera ya listo:
+    // el decoder los entrega con retraso, y conformarse con uno anterior
+    // hacía que el vídeo exportado se fuera quedando atrás respecto al
+    // audio en cuanto los timestamps de la fuente no caían justo en la
+    // rejilla de la salida (fuente a otra fps, o MKV/WebM, que redondea
+    // los timestamps al milisegundo) — hasta casi un segundo en 3 s.
+    const targetReady = () =>
+      (held !== undefined && held.timestamp >= target.timestampUs) ||
+      pending.some((frame) => frame.timestamp >= target.timestampUs && frame.timestamp <= effectiveTimeUs);
     const arrived = await waitUntil(targetReady, 2000);
     if (!arrived) {
       // Último recurso: no queda margen de lookahead por delante
@@ -182,19 +190,20 @@ export function createForwardFrameSeeker(demuxed: DemuxedTrack): FrameSeeker {
       }
       pending.push(...notReady);
 
-      let shown: VideoFrame | undefined;
       for (const frame of ready) {
-        if (!shown || frame.timestamp > shown.timestamp) {
-          shown?.close();
-          shown = frame;
+        if (!held || frame.timestamp > held.timestamp) {
+          held?.close();
+          held = frame;
         } else {
           frame.close();
         }
       }
-      return shown;
+      return held?.clone();
     },
     destroy(): void {
       for (const frame of pending.splice(0)) frame.close();
+      held?.close();
+      held = undefined;
       decoder.close();
     },
   };

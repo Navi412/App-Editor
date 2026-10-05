@@ -3,7 +3,7 @@ import { neighborsOfTransition } from "../core/timeline";
 import type { Clip, Track, TransitionType } from "../core/types";
 import { captureFrameBitmap } from "./frameSnapshot";
 import type { DemuxedTrack } from "./samples";
-import { inferFrameRate } from "./sourceFile";
+import { frameRateOf } from "./sourceFile";
 
 /**
  * Fotogramas fijos que delimitan una transición: el último fotograma
@@ -39,7 +39,7 @@ export async function captureTransitionBoundaryFrames(
   if (prevClip) {
     const demuxed = getSource(prevClip.sourceId);
     if (demuxed) {
-      const frameStep = frameDurationTicks(inferFrameRate(demuxed.samples, demuxed.videoTrack.timescale));
+      const frameStep = frameDurationTicks(frameRateOf(demuxed));
       const atTicks = Math.max(prevClip.sourceInTicks, prevClip.sourceOutTicks - frameStep);
       fromImage = await captureFrameBitmap(demuxed, Math.round(ticksToSeconds(atTicks) * 1_000_000), width, height);
     }

@@ -24,15 +24,16 @@ interface SampleEntryWithConfigBox {
  * serializando la caja avcC/hvcC de la muestra y descartando su
  * cabecera de caja (8 bytes: tamaño + fourcc), ya que WebCodecs quiere
  * el registro "en crudo", no la caja ISOBMFF completa.
+ *
+ * undefined para códecs que no la necesitan (VP8/VP9; en AV1 es
+ * opcional) — si un códec sin caja conocida no se puede decodificar,
+ * lo dirá `isConfigSupported` al validar la fuente (checkDecodable en
+ * media/samples.ts), con un mensaje mejor que adivinarlo aquí.
  */
-export function getDecoderDescription(sample: Sample): Uint8Array {
+export function getDecoderDescription(sample: Sample): Uint8Array | undefined {
   const entry = sample.description as unknown as SampleEntryWithConfigBox;
   const box = entry.avcC ?? entry.hvcC;
-  if (!box) {
-    throw new Error(
-      "La pista no tiene una caja avcC/hvcC — códec no soportado en esta rebanada (solo H.264/H.265)",
-    );
-  }
+  if (!box) return undefined;
   const stream = new DataStream(undefined, 0, Endianness.BIG_ENDIAN);
   box.write(stream);
   return new Uint8Array(stream.buffer, 8);

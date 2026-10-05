@@ -1,6 +1,4 @@
-import type { Track } from "mp4box";
-import { getDecoderDescription } from "./description";
-import type { DemuxedTrack } from "./samples";
+import { baseDecoderConfig, type DemuxedTrack, type DemuxedVideoTrack } from "./samples";
 import { sampleDurationUs, sampleTimestampUs } from "./sampleTime";
 
 /**
@@ -16,7 +14,7 @@ import { sampleDurationUs, sampleTimestampUs } from "./sampleTime";
  * ver DESIGN.md §3.
  */
 export interface VideoPlayer {
-  readonly videoTrack: Track;
+  readonly videoTrack: DemuxedVideoTrack;
   readonly durationSeconds: number;
   /**
    * Busca el fotograma activo en timeUs (microsegundos, tiempo de la
@@ -73,8 +71,6 @@ export function createVideoPlayer(
   const presentationOrder = [...samples].sort(
     (a, b) => sampleTimestampUs(a) - sampleTimestampUs(b),
   );
-
-  const decoderDescription = getDecoderDescription(firstSample);
 
   const durationSeconds = videoTrack.duration / videoTrack.timescale;
   const outputQueue: VideoFrame[] = [];
@@ -137,22 +133,16 @@ export function createVideoPlayer(
         callbacks.onStatus?.(`Error de decodificación: ${error.message}`);
       },
     });
-    decoder.configure({
-      codec: videoTrack.codec,
-      description: decoderDescription,
-      // Sin hardwareAcceleration explícito (decisión revertida — ver
-      // CLAUDE.md/git log): este decoder se re-cebra a menudo durante el
-      // scrubbing interactivo (cada seek puede necesitar recrear el
-      // decoder o re-alimentarlo desde el keyframe más cercano, ver
-      // primeDecoderIfNeeded más abajo), y forzar "prefer-hardware" ahí
-      // resultó en reproducción/scrubbing MÁS lentos en la práctica —
-      // probablemente por el coste de (re)crear una sesión de
-      // decodificación por hardware con tanta frecuencia. Se deja que el
-      // navegador decida caso por caso.
-      ...(videoTrack.video
-        ? { codedWidth: videoTrack.video.width, codedHeight: videoTrack.video.height }
-        : {}),
-    });
+    // Sin hardwareAcceleration explícito (decisión revertida — ver
+    // CLAUDE.md/git log): este decoder se re-cebra a menudo durante el
+    // scrubbing interactivo (cada seek puede necesitar recrear el
+    // decoder o re-alimentarlo desde el keyframe más cercano, ver
+    // primeDecoderIfNeeded más abajo), y forzar "prefer-hardware" ahí
+    // resultó en reproducción/scrubbing MÁS lentos en la práctica —
+    // probablemente por el coste de (re)crear una sesión de
+    // decodificación por hardware con tanta frecuencia. Se deja que el
+    // navegador decida caso por caso.
+    decoder.configure(baseDecoderConfig(demuxed));
     return decoder;
   }
 

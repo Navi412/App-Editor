@@ -336,6 +336,49 @@ clip. `setClipFlagged` en `core/timeline.ts` (pura, misma forma que
 `setClipColorFilter`); se serializa/valida en `core/project.ts` como
 los demás campos opcionales de `Clip`.
 
+**Más formatos de vídeo de entrada — ampliación pedida explícitamente
+el 2026-10-05** ("hay muchos formatos que no detecta"). Antes solo se
+aceptaba MP4 con H.264/H.265. Ahora:
+
+- **Contenedores**: MP4/MOV/M4V/3GP (mp4box.js, como siempre),
+  **Matroska/WebM** (`media/demuxMatroska.ts` — OBS graba en MKV por
+  defecto) y **MPEG-TS/M2TS** (`media/demuxMpegTs.ts` — .ts/.mts/.m2ts
+  de cámaras AVCHD). Demuxers propios, puros sobre bytes, sin
+  dependencias nuevas. `decodeAllSamples` (`media/samples.ts`) elige
+  por los primeros bytes (`sniffContainer`), no por la extensión.
+  `DemuxedTrack` ya no son los tipos de mp4box sino
+  `DemuxedSample`/`DemuxedVideoTrack` (el subconjunto que usa /media;
+  las muestras de mp4box encajan tal cual) + `decoderDescription` y
+  `frameRate` opcionales que rellena el demuxer.
+- **Códecs**: H.264, H.265/HEVC, VP8, VP9 y AV1 — lo que WebCodecs
+  decodifique en la máquina. `checkDecodable` lo comprueba con
+  `VideoDecoder.isConfigSupported` al cargar (mensaje claro tipo "usa
+  ProRes, que no se puede decodificar") y, si el contenedor no declara
+  el tamaño (TS), decodifica el primer keyframe para averiguarlo. Las
+  cadenas de códec de WebCodecs salen de `media/codecStrings.ts`.
+  `baseDecoderConfig` es la única construcción del `VideoDecoderConfig`
+  (player, seeker de exportación, comprobación). HEVC nunca pide
+  `prefer-software` (Chromium no tiene decodificador HEVC por software).
+- **Timestamps**: Matroska los redondea al ms; `snapToFrameGrid` los
+  devuelve a la rejilla exacta de su frame rate (`snapFrameRate`) si
+  están a menos de una unidad de redondeo — si no, la exportación
+  cogía el fotograma anterior. TS se normaliza a 0 en el primer
+  keyframe (su reloj empieza en cualquier valor).
+- **Audio de TS**: `decodeAudioData` no abre TS; `extractMpegTsAudio`
+  le pasa el flujo AAC (ADTS) o MP3 de dentro, alineado con el primer
+  fotograma (`alignAudioStart` en `media/audio.ts`). AC-3 (habitual en
+  AVCHD) queda sin audio: Chromium no lo decodifica.
+- De paso, **arreglado** `createForwardFrameSeeker.next()`: se
+  conformaba con cualquier fotograma ya listo ≤ t en vez de esperar al
+  objetivo, así que con una fuente a otra fps que la salida el vídeo
+  exportado se iba retrasando respecto al audio (hasta ~0,8 s en 3 s).
+  Ahora espera al fotograma objetivo y retiene el último (`held`,
+  devuelve `clone()`) para cuando la salida va a más fps que la fuente.
+
+Siguen fuera: AVI, MPEG-PS (.mpg/.vob), FLV, WMV, y los códecs que
+WebCodecs no decodifica (MPEG-2, MPEG-4 Part 2/Xvid, ProRes, DNxHD) —
+se rechazan con un mensaje que lo dice, no se transcodifican.
+
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:** importar archivos
 de solo audio (mp3/wav) como fuente propia para una pista de audio,
@@ -540,6 +583,8 @@ menú), sin tocar `/core`, `/media` ni `/export`:
   pipeline de edición — solo WebCodecs nos da control fotograma a fotograma.
 - **mp4box.js** para demuxear (leer `moov`, tabla de muestras, keyframes) y
   muxear el contenedor MP4 de salida.
+  Matroska/WebM y MPEG-TS se demuxan con código propio (`media/demuxMatroska.ts`,
+  `media/demuxMpegTs.ts`), sin dependencias nuevas.
 - **Canvas 2D** (`OffscreenCanvas` donde se pueda, para no bloquear el hilo
   principal) para componer cada fotograma antes de previsualizar o codificar,
   y también para pintar la línea de tiempo entera (`ui/timelineCanvas.ts`).

@@ -76,12 +76,11 @@ import { ExportCancelledError, exportTimelineToMp4 } from "../export/exportTimel
 import { getAppVideoBridge, readFileFromPath } from "./electronBridge";
 import { decodeAudioAsset } from "../media/audio";
 import { playAudioSlice, type AudioPlaybackHandle } from "../media/audioPlayer";
-import { getDecoderDescription } from "../media/description";
 import { createMasterAudioChain, type MasterAudioChain } from "../media/masterAudioChain";
 import { ColorGradeRenderer, type ResolvedLut } from "../media/colorGradeGL";
 import { createVideoPlayer, type VideoPlayer } from "../media/player";
 import { drawFrameFit, lookForClip, type FrameLook } from "../media/render";
-import { decodeAllSamples, type DemuxedTrack } from "../media/samples";
+import { checkDecodable, decodeAllSamples, VIDEO_FILE_ACCEPT, type DemuxedTrack } from "../media/samples";
 import { toSourceFile } from "../media/sourceFile";
 import { drawTextOverlays } from "../media/textOverlayRender";
 import {
@@ -130,6 +129,9 @@ const loadProjectButton = requireElement<HTMLButtonElement>("#load-project-butto
 const projectFileInput = requireElement<HTMLInputElement>("#project-file-input");
 const projectSourcesInput = requireElement<HTMLInputElement>("#project-sources-input");
 const projectStatus = requireElement<HTMLParagraphElement>("#project-status");
+// Una sola lista de formatos (media/samples.ts) para los dos selectores de vídeo.
+fileInput.accept = VIDEO_FILE_ACCEPT;
+projectSourcesInput.accept = VIDEO_FILE_ACCEPT;
 const timelineScroll = requireElement<HTMLDivElement>("#timeline-scroll");
 const timelineContent = requireElement<HTMLDivElement>("#timeline-content");
 const timelineGutters = requireElement<HTMLDivElement>("#timeline-gutters");
@@ -3289,18 +3291,12 @@ function topmostVideoTrackId(tl: Timeline): string | undefined {
 async function addClipFromFile(file: File): Promise<void> {
   status.textContent = `Cargando ${file.name}...`;
   try {
-    const { videoTrack, samples } = await decodeAllSamples(file);
-    const firstSample = samples[0];
-    if (!firstSample) {
-      throw new Error("El archivo no tiene ningún fotograma de vídeo");
-    }
-    // Falla pronto y con un mensaje claro si el códec no es compatible
-    // (solo H.264/H.265, ver media/description.ts), en vez de añadir un
-    // clip que luego fallará en silencio al reproducirlo o exportarlo.
-    getDecoderDescription(firstSample);
-    const demuxed = { videoTrack, samples };
+    // checkDecodable falla pronto y con un mensaje claro si el códec no
+    // se puede decodificar en este equipo, en vez de añadir un clip que
+    // luego fallará en silencio al reproducirlo o exportarlo.
+    const demuxed = await checkDecodable(await decodeAllSamples(file));
     const sourceId = `source-${nextSourceNumber++}`;
-    const sourceFile = toSourceFile(sourceId, videoTrack, samples);
+    const sourceFile = toSourceFile(sourceId, demuxed);
     const thumbnail = await generateThumbnail(demuxed).catch((error: unknown) => {
       console.warn("No se pudo generar la miniatura del clip:", error);
       return undefined;
@@ -4711,13 +4707,9 @@ async function applyPendingProject(project: ProjectFile, manualFiles: File[]): P
   try {
     for (const projectSource of project.sources) {
       const file = byId.get(projectSource.id)!;
-      const { videoTrack, samples } = await decodeAllSamples(file);
-      const firstSample = samples[0];
-      if (!firstSample) {
-        throw new Error(`${projectSource.fileName} no tiene ningún fotograma de vídeo`);
-      }
-      getDecoderDescription(firstSample);
-      const demuxed = { videoTrack, samples };
+      const demuxed = await checkDecodable(await decodeAllSamples(file)).catch((error: unknown) => {
+        throw new Error(`${projectSource.fileName}: ${error instanceof Error ? error.message : String(error)}`);
+      });
       const thumbnail = await generateThumbnail(demuxed).catch((error: unknown) => {
         console.warn("No se pudo generar la miniatura del clip:", error);
         return undefined;

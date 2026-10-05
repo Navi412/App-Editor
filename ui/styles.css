@@ -1454,6 +1454,19 @@ dialog.app-modal::backdrop {
   margin-top: 1rem;
 }
 
+/* Botones de keyframes del panel Transformar. */
+.tf-keyframe-row {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.tf-keyframe-row button.tf-key-on {
+  color: var(--accent);
+  box-shadow: var(--nm-inset-sm);
+}
+
 /* Lista de archivos a reenlazar: nombre + estado + botón Buscar. */
 .relink-list {
   list-style: none;

@@ -211,6 +211,48 @@
                 <p class="hint-inline">Se aplica arrastrando un filtro desde el panel de efectos.</p>
               </div>
 
+              <details class="sub-section" id="transform-sub">
+                <summary>Transformar (posición, escala, rotación, opacidad)</summary>
+                <div class="sub-section-body">
+                  <div class="slider-row">
+                    <span>Posición X</span>
+                    <input id="tf-x" type="range" min="-1" max="1" step="0.005" value="0" />
+                    <output id="tf-x-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Posición Y</span>
+                    <input id="tf-y" type="range" min="-1" max="1" step="0.005" value="0" />
+                    <output id="tf-y-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Escala</span>
+                    <input id="tf-scale" type="range" min="0.05" max="4" step="0.01" value="1" />
+                    <output id="tf-scale-val">1</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Rotación</span>
+                    <input id="tf-rotation" type="range" min="-180" max="180" step="0.5" value="0" />
+                    <output id="tf-rotation-val">0</output>
+                  </div>
+                  <div class="slider-row">
+                    <span>Opacidad</span>
+                    <input id="tf-opacity" type="range" min="0" max="1" step="0.01" value="1" />
+                    <output id="tf-opacity-val">1</output>
+                  </div>
+                  <div class="tf-keyframe-row">
+                    <button id="tf-prev-key" type="button" title="Keyframe anterior">◀</button>
+                    <button id="tf-toggle-key" type="button" title="Poner o quitar un keyframe en el playhead">◆ Keyframe</button>
+                    <button id="tf-next-key" type="button" title="Keyframe siguiente">▶</button>
+                    <button id="tf-reset" type="button" title="Quitar la transformación y su animación">Restablecer</button>
+                  </div>
+                  <p class="hint-inline" id="tf-hint">
+                    Sin keyframes, los valores valen para todo el clip. Con ◆ se anima: cada cambio crea o ajusta el
+                    keyframe del playhead. Lo que deje ver el clip (más pequeño, girado o transparente) muestra la pista
+                    de vídeo de debajo.
+                  </p>
+                </div>
+              </details>
+
               <details class="sub-section" id="grade-sub">
                 <summary>Grading (luz, balance, lift / gamma / gain)</summary>
                 <div class="sub-section-body">
@@ -377,8 +419,7 @@
                     <output id="chroma-smoothness-val">0.10</output>
                   </div>
                   <p class="hint-inline">
-                    Solo se compone sobre la pista de abajo en la EXPORTACIÓN — la previsualización muestra el
-                    recorte sobre negro (limitación del motor de reproducción, no un fallo).
+                    Lo recortado deja ver la pista de vídeo de debajo, en el preview y en la exportación.
                   </p>
                 </div>
               </details>

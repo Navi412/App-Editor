@@ -1,4 +1,4 @@
-import { NEUTRAL_COLOR_GRADE, type ChromaKey, type Clip, type ColorFilterType, type ColorGrade, type LutAsset } from "../core/types";
+import { NEUTRAL_COLOR_GRADE, type ChromaKey, type Clip, type ClipTransform, type ColorFilterType, type ColorGrade, type LutAsset } from "../core/types";
 import { needsColorGradeGL, type ColorGradeRenderer, type ResolvedLut } from "./colorGradeGL";
 
 /**
@@ -58,6 +58,12 @@ export interface FrameDrawTarget {
   clearRect(x: number, y: number, w: number, h: number): void;
   drawImage(image: CanvasImageSource, dx: number, dy: number, dw: number, dh: number): void;
   filter: string;
+  globalAlpha: number;
+  save(): void;
+  restore(): void;
+  translate(x: number, y: number): void;
+  rotate(angle: number): void;
+  scale(x: number, y: number): void;
 }
 
 const COLOR_FILTER_CSS: Record<ColorFilterType, string> = {
@@ -88,6 +94,10 @@ export function colorFilterCss(colorFilter: ColorFilterType | undefined): string
  * pintar — a false para componer ENCIMA de lo que ya haya en `ctx` (ver
  * export/exportTimeline.ts, que dibuja primero la capa de fondo de un
  * croma con `clear:true` y luego la capa recortada con `clear:false`).
+ *
+ * `transform` (mejora del 2026-10-05, ver ClipTransform en core/types.ts):
+ * desplaza/escala/gira el encaje alrededor del centro del lienzo y le
+ * aplica opacidad. Sin él (o identidad), exactamente el dibujo de siempre.
  */
 export function drawFrameFit(
   ctx: FrameDrawTarget,
@@ -96,6 +106,7 @@ export function drawFrameFit(
   look: FrameLook = {},
   gradeRenderer?: ColorGradeRenderer,
   clear: boolean = true,
+  transform?: ClipTransform,
 ): void {
   if (clear) ctx.clearRect(0, 0, target.width, target.height);
   const rect = computeFitRect({ width: frame.displayWidth, height: frame.displayHeight }, target);
@@ -104,6 +115,20 @@ export function drawFrameFit(
     gradeRenderer && needsColorGradeGL(look.colorGrade, look.chromaKey, look.lut)
       ? gradeRenderer.draw(frame, look.colorGrade ?? NEUTRAL_COLOR_GRADE, look.chromaKey, look.lut)
       : frame;
-  ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height);
+  if (transform && !isIdentity(transform)) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity));
+    ctx.translate(target.width / 2 + transform.x * target.width, target.height / 2 + transform.y * target.height);
+    ctx.rotate((transform.rotation * Math.PI) / 180);
+    ctx.scale(transform.scale, transform.scale);
+    ctx.drawImage(source, rect.x - target.width / 2, rect.y - target.height / 2, rect.width, rect.height);
+    ctx.restore();
+  } else {
+    ctx.drawImage(source, rect.x, rect.y, rect.width, rect.height);
+  }
   ctx.filter = "none";
+}
+
+function isIdentity(t: ClipTransform): boolean {
+  return t.x === 0 && t.y === 0 && t.scale === 1 && t.rotation === 0 && t.opacity === 1;
 }

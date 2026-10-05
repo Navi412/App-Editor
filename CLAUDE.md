@@ -29,13 +29,14 @@ cada clip pegado a su vídeo:
   (editable haciendo clic en el nombre del gutter, `renameTrack` en
   `core/timeline.ts`) — sin él, la UI muestra un nombre automático
   ("Vídeo N"/"Audio N" según su posición entre las de su tipo).
-- **Composición de vídeo**: capas opacas. Se recorre `Timeline.tracks`
-  de arriba a abajo y se dibuja la primera pista de vídeo no oculta que
-  tenga un clip en ese instante (`resolveActiveVideoPosition` en
-  `core/timeline.ts`) — sin mezcla alfa real. Si ninguna tiene
-  contenido, negro. Excepción única y acotada: un clip con `chromaKey`
-  activo SÍ compone con la pista inmediatamente inferior, pero solo en
-  la exportación — ver "Grading real y croma" más abajo.
+- **Composición de vídeo**: por capas (desde el 2026-10-05, ver
+  "Transformación con keyframes y composición" en las mejoras de esa
+  fecha). `resolveVideoLayers` (`core/transform.ts`) recorre las pistas
+  de vídeo no ocultas de arriba a abajo y se detiene en la primera capa
+  que tapa el fotograma entero: opaca, sin croma y sin transformar.
+  Las pinta de abajo arriba. En el caso normal (un clip sin
+  transformar) es UNA capa, como antes. Sin contenido, negro. Preview y
+  exportación usan la misma función.
 - **Mezcla de audio**: TODAS las pistas no ocultas suenan a la vez y se
   mezclan — tanto el audio pegado a los clips de las pistas de vídeo
   (independientemente de si están tapadas visualmente por una pista de
@@ -237,18 +238,11 @@ separado porque son independientes entre sí:
   grading/croma activo (el caso común) o WebGL2 no está disponible,
   `drawFrameFit` no toca la GPU para nada extra — el coste es
   exactamente el de siempre.
-  **Limitación deliberada del croma**: solo compone con la pista de
-  vídeo inmediatamente inferior (`resolveActiveVideoPositionBelow`) EN
-  LA EXPORTACIÓN. La previsualización en directo sigue mostrando solo
-  la pista superior (con el croma ya recortado, alfa real, pero sobre
-  negro) — el motor de reproducción en vivo (`media/player.ts`) está
-  construido alrededor de un único `VideoPlayer` activo empujando
-  fotogramas por callback (`onFrame`), no de una tubería que pueda tirar
-  de dos fuentes sincronizadas a la vez; forzarlo habría sido reescribir
-  esa tubería (con el riesgo de reintroducir el bug de "reproducción
-  congelada a mitad de GOP" ya resuelto una vez) por una previsualización
-  perfecta que la exportación ya proporciona. Documentado explícitamente
-  en la UI (panel de croma), no un olvido.
+  El croma componía antes solo en la exportación y solo con la pista
+  inmediatamente inferior. Desde el 2026-10-05 es una capa más que no
+  tapa (`resolveVideoLayers`) y se ve compuesta también en el preview,
+  sin reescribir el player (ver "Transformación con keyframes y
+  composición").
 
 **Edición avanzada y color ampliado — ampliación pedida explícitamente
 el 2026-10-02** (el usuario eligió exactamente estas, ver abajo):
@@ -489,6 +483,27 @@ mientras estaba fuera; cada una va en su propio commit):
   (`createForwardFrameSeeker(…, "prefer-hardware")`; por software eran
   90 s) y el salto medio del player baja de ~160 ms a ~10 ms. No se
   guardan en disco: se regeneran en cada sesión.
+- **Transformación con keyframes y composición** (`core/transform.ts`).
+  `Clip.transform` (fija) o `Clip.transformKeyframes` (animada):
+  posición (fracción del lienzo desde el centro), escala sobre el
+  encaje, rotación en grados y opacidad. `transformAt` interpola con
+  suavizado (smoothstep; `easing: "linear"` opcional por keyframe). Al
+  cortar, la animación se reparte con un keyframe en el corte; al
+  cambiar la velocidad, se reescala. `drawFrameFit` aplica la
+  transformación (misma función en preview y exportación).
+  **Composición en el preview, sin tocar `media/player.ts`:** el player
+  sigue pintando la capa de arriba. `onFrame` guarda un `clone()`
+  (`lastActiveFrame`) y llama a `composePreview`. Las capas de debajo
+  salen de FrameSeekers propios (`requestLowerLayers`, del proxy si lo
+  hay), uno por pista+fuente: avanzan con el playhead y se recrean al
+  ir hacia atrás. Solo hay una actualización en vuelo; al acabar,
+  recompone. Panel "Transformar" en el inspector: los sliders
+  previsualizan en vivo (`liveTransform`, sin decodificar) y guardan al
+  soltar. ◆ pone o quita un keyframe en el playhead; con animación,
+  cada cambio crea o ajusta el keyframe del playhead (auto-key);
+  ◀ ▶ saltan entre keyframes. Comprobado que preview y export
+  coinciden: imagen en imagen girada, fundido de opacidad y
+  reproducción con las dos capas sincronizadas al fotograma.
 
 **Fuera de alcance deliberadamente, salvo que se pida explícitamente
 ampliarlo:**

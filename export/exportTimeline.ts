@@ -12,6 +12,7 @@ import { activeTextOverlaysAt, type TextOverlay } from "../core/textOverlay";
 import { playAudioSlice } from "../media/audioPlayer";
 import { createMasterAudioChain } from "../media/masterAudioChain";
 import { drawFrameFit, lookForClip } from "../media/render";
+import { resolveVideoLayers } from "../core/transform";
 import type { DemuxedTrack } from "../media/samples";
 import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
 import { yieldToTaskQueue } from "../media/scheduling";
@@ -163,14 +164,18 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
   });
   encoder.configure(encoderConfig);
 
+  // Un lector secuencial por (pista, fuente): con composición por capas,
+  // dos pistas pueden usar la misma fuente en instantes distintos a la
+  // vez, y un FrameSeeker solo sabe avanzar.
   const seekers = new Map<string, FrameSeeker>();
-  function seekerFor(sourceId: string): FrameSeeker {
-    let seeker = seekers.get(sourceId);
+  function seekerFor(trackId: string, sourceId: string): FrameSeeker {
+    const key = `${trackId}|${sourceId}`;
+    let seeker = seekers.get(key);
     if (!seeker) {
       const demuxed = getSource(sourceId);
       if (!demuxed) throw new Error(`Fuente no encontrada: ${sourceId}`);
       seeker = createForwardFrameSeeker(demuxed);
-      seekers.set(sourceId, seeker);
+      seekers.set(key, seeker);
     }
     return seeker;
   }
@@ -192,54 +197,27 @@ export async function exportTimelineToMp4(options: ExportOptions): Promise<Blob>
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       throwIfAborted(signal);
       const timelineTicks = rangeStartTicks + frameIndex * stepTicks;
-      const position = resolveActiveVideoPosition(timeline, timelineTicks);
 
-      if (!position) {
-        ctx.clearRect(0, 0, width, height);
-      } else if (position.clip.kind === "transition") {
-        const track = timeline.tracks.find((t) => t.id === position.trackId)!;
-        const frames = await transitionFramesFor(track, position.clip);
-        const duration = clipDurationTicks(position.clip);
-        const progress = duration > 0 ? (timelineTicks - position.clip.startTicks) / duration : 0;
-        drawTransitionFrame(ctx, width, height, position.clip.transitionType ?? "crossfade", frames, progress);
-      } else {
-        // Croma activo: se resuelve y dibuja PRIMERO la pista de vídeo
-        // visible inmediatamente inferior (si tiene contenido ahí) como
-        // fondo, y el clip con croma se compone encima sin volver a
-        // limpiar (clear:false) — únicamente en la exportación, ver
-        // ChromaKey en core/types.ts sobre por qué el preview en directo
-        // no compone dos capas.
-        if (position.clip.chromaKey?.enabled) {
-          const aboveTrackIndex = timeline.tracks.findIndex((t) => t.id === position.trackId);
-          const below = resolveActiveVideoPositionBelow(timeline, timelineTicks, aboveTrackIndex);
-          let drewBackground = false;
-          if (below && below.clip.kind === "clip") {
-            const belowTimeUs = Math.round(ticksToSeconds(below.sourceTimeTicks) * 1_000_000);
-            const belowFrame = await seekerFor(below.sourceId).next(belowTimeUs);
-            if (belowFrame) {
-              drawFrameFit(ctx, belowFrame, { width, height }, lookForClip(below.clip, timeline.luts), gradeRenderer);
-              belowFrame.close();
-              drewBackground = true;
-            }
-          }
-          if (!drewBackground) ctx.clearRect(0, 0, width, height);
+      // Composición por capas (resolveVideoLayers, mejora del 2026-10-05):
+      // de abajo a arriba, hasta la primera que tapa el fotograma entero.
+      // Lo normal es UNA capa (un clip sin transformar), el dibujo de
+      // siempre. El croma ya no es un caso aparte: una capa con croma no
+      // tapa, así que la de debajo se pinta antes.
+      ctx.clearRect(0, 0, width, height);
+      for (const layer of resolveVideoLayers(timeline, timelineTicks)) {
+        if (layer.clip.kind === "transition") {
+          const track = timeline.tracks.find((t) => t.id === layer.trackId)!;
+          const frames = await transitionFramesFor(track, layer.clip);
+          const duration = clipDurationTicks(layer.clip);
+          const progress = duration > 0 ? layer.offsetTicks / duration : 0;
+          drawTransitionFrame(ctx, width, height, layer.clip.transitionType ?? "crossfade", frames, progress);
+          continue;
         }
-
-        const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
-        const frame = await seekerFor(position.sourceId).next(sourceTimeUs);
-        if (frame) {
-          drawFrameFit(
-            ctx,
-            frame,
-            { width, height },
-            lookForClip(position.clip, timeline.luts),
-            gradeRenderer,
-            !position.clip.chromaKey?.enabled, // clear:false si ya se dibujó un fondo encima del que componer
-          );
-          frame.close();
-        } else if (!position.clip.chromaKey?.enabled) {
-          ctx.clearRect(0, 0, width, height);
-        }
+        const sourceTimeUs = Math.round(ticksToSeconds(layer.sourceTimeTicks) * 1_000_000);
+        const frame = await seekerFor(layer.trackId, layer.sourceId).next(sourceTimeUs);
+        if (!frame) continue;
+        drawFrameFit(ctx, frame, { width, height }, lookForClip(layer.clip, timeline.luts), gradeRenderer, false, layer.transform);
+        frame.close();
       }
 
       const activeOverlays = activeTextOverlaysAt(textOverlays, timelineTicks);

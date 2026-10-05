@@ -194,6 +194,33 @@ export interface VolumeKeyframe {
 }
 
 /**
+ * Transformación de un clip de vídeo sobre el lienzo de salida — mejora
+ * pedida el 2026-10-05 (imagen en imagen, zoom, giros, fundidos de
+ * opacidad). Se aplica sobre el encaje (aspect-fit) de siempre:
+ * - `x`, `y`: desplazamiento del centro, en fracción del ancho/alto de
+ *   salida (0 = centrado; 0.5 = medio lienzo a la derecha/abajo).
+ * - `scale`: 1 = el encaje normal; 0.5 = a la mitad.
+ * - `rotation`: grados, sentido horario.
+ * - `opacity`: 0-1. Por debajo de 1 (o si no tapa todo el lienzo) se ve
+ *   la pista de vídeo inferior — ver resolveVideoLayers.
+ */
+export interface ClipTransform {
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+  opacity: number;
+}
+
+export const IDENTITY_TRANSFORM: ClipTransform = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
+
+/** Keyframe de transformación: valores en `offsetTicks` (relativo al inicio del clip, como VolumeKeyframe). `easing` describe el tramo que LLEGA a este keyframe ("ease" por defecto). */
+export interface TransformKeyframe extends ClipTransform {
+  offsetTicks: number;
+  easing?: "ease" | "linear";
+}
+
+/**
  * Un Clip es una referencia a un SourceFile más un rango de tiempo
  * dentro de ese archivo — nunca datos de píxeles copiados.
  *
@@ -256,6 +283,10 @@ export interface Clip {
   colorGrade?: ColorGrade;
   /** Solo relevante si kind === "clip". undefined = sin croma. Ver ChromaKey. */
   chromaKey?: ChromaKey;
+  /** Transformación fija (sin animar). undefined = identidad. Se ignora si hay `transformKeyframes`. Ver ClipTransform. */
+  transform?: ClipTransform;
+  /** Animación de la transformación (orden ascendente por offsetTicks). Ver core/transform.ts. */
+  transformKeyframes?: TransformKeyframe[];
   /** Solo relevante si kind === "clip". undefined = sin LUT. Ver LutAsset/ClipLut. */
   lut?: ClipLut;
   /**

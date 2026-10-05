@@ -70,7 +70,7 @@ import type {
   TrackKind,
   TransitionType,
 } from "../core/types";
-import { NEUTRAL_CHROMA_KEY, NEUTRAL_COLOR_GRADE } from "../core/types";
+import { IDENTITY_TRANSFORM, NEUTRAL_CHROMA_KEY, NEUTRAL_COLOR_GRADE, type ClipTransform } from "../core/types";
 import {
   evaluateCurve,
   IDENTITY_CURVE,
@@ -91,6 +91,15 @@ import { createVideoPlayer, type VideoPlayer } from "../media/player";
 import { drawFrameFit, lookForClip, type FrameLook } from "../media/render";
 import { checkDecodable, decodeAllSamples, VIDEO_FILE_ACCEPT, type DemuxedTrack } from "../media/samples";
 import { toSourceFile } from "../media/sourceFile";
+import {
+  clearTransformKeyframes,
+  resolveVideoLayers,
+  setClipTransformAt,
+  toggleTransformKeyframe,
+  transformAt,
+  type VideoLayer,
+} from "../core/transform";
+import { createForwardFrameSeeker, type FrameSeeker } from "../media/frameSeeker";
 import { createProxy, proxyBytes, shouldCreateProxy } from "../media/proxy";
 import { drawTextOverlays } from "../media/textOverlayRender";
 import {
@@ -610,6 +619,7 @@ function afterHistoryChange(): void {
     clipColorFilterSelect.value = found.clip.colorFilter ?? "";
     syncClipSpeedSelect(found.clip);
     syncGradePanel(found.clip); // el grading se guarda solo al soltar cada barra: deshacer tiene que devolver las barras a su sitio
+    syncTransformPanel();
   }
   void seekToTimelineTicks(Math.min(playheadTicks, Math.max(timelineTotalTicks - 1, 0)));
   updateHistoryButtons();
@@ -706,11 +716,13 @@ function getPlayer(sourceId: string): VideoPlayer {
     entry.player = createVideoPlayer(wantProxy ? entry.proxy! : entry.demuxed, {
       onFrame: (frame) => {
         if (!timeline) return;
-        drawFrameFit(ctx, frame, timeline.outputResolution, activeLook, previewGradeRenderer);
-        if (textOverlays.length > 0) {
-          const ticks = timelineTicksForSourceFrame(sourceId, frame.timestamp) ?? playheadTicks;
-          drawActiveTextOverlays(ticks);
-        }
+        const ticks = timelineTicksForSourceFrame(sourceId, frame.timestamp) ?? playheadTicks;
+        // Copia del fotograma para poder recomponer (capas de debajo que
+        // llegan después, transformación en vivo) sin volver a decodificar.
+        lastActiveFrame?.close();
+        lastActiveFrame = frame.clone();
+        lastActiveFrameTicks = ticks;
+        composePreview(frame, ticks, true);
       },
       onStatus: (message) => {
         status.textContent = message;
@@ -949,12 +961,16 @@ async function seekToTimelineTicks(ticks: number): Promise<void> {
   // Fijarlo después dejaría ese cálculo usando la posición del seek
   // ANTERIOR mientras este fotograma se dibuja.
   setPlayheadTicks(ticks);
+  // Con keyframes de transformación, los valores del panel dependen del playhead.
+  if (selectedClip) syncTransformPanel();
 
   if (!position) {
+    forgetActiveFrame();
     drawGapFrame(ticks);
     return;
   }
   if (position.clip.kind === "transition") {
+    forgetActiveFrame();
     const track = timeline.tracks.find((t) => t.id === position.trackId)!;
     const clip = position.clip;
     const durationTicks = clipDurationTicks(clip);
@@ -970,6 +986,257 @@ async function seekToTimelineTicks(ticks: number): Promise<void> {
   const sourceTimeUs = Math.round(ticksToSeconds(position.sourceTimeTicks) * 1_000_000);
   await player.seekTo(sourceTimeUs);
 }
+
+// --- Composición por capas en el preview — mejora pedida el 2026-10-05 ---
+// El player pinta la capa de ARRIBA (la de siempre). Si esa capa no tapa
+// el fotograma entero (transformada, transparente o con croma; ver
+// resolveVideoLayers), las de debajo se sirven con FrameSeekers propios
+// —los mismos lectores secuenciales que la exportación, del proxy si lo
+// hay— al ritmo del playhead, y se recompone. Sin capas de debajo (lo
+// normal), el coste es el de siempre: un drawFrameFit.
+
+/** Copia del último fotograma de la capa de arriba, para recomponer sin decodificar otra vez. */
+let lastActiveFrame: VideoFrame | undefined;
+let lastActiveFrameTicks = 0;
+/** Último fotograma de cada capa de debajo, por pista. */
+const lowerLayerFrames = new Map<string, { clipId: string; frame: VideoFrame }>();
+/** Lectores de las capas de debajo, por pista+fuente (+proxy u original). */
+const lowerLayerSeekers = new Map<string, { seeker: FrameSeeker; lastUs: number }>();
+let lowerLayerUpdate: Promise<void> | undefined;
+let lowerLayerPendingTicks: number | undefined;
+/** Transformación que se está arrastrando en el panel (aún sin guardar en el clip). */
+let liveTransform: { clipId: string; transform: ClipTransform } | undefined;
+
+/** La timeline con la transformación en vivo del panel aplicada al clip que se edita (fija en ese instante). */
+function timelineForPreview(): Timeline | undefined {
+  if (!timeline || !liveTransform) return timeline;
+  const { clipId, transform } = liveTransform;
+  return {
+    ...timeline,
+    tracks: timeline.tracks.map((track) => ({
+      ...track,
+      clips: track.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const { transformKeyframes: _k, ...rest } = c;
+        return { ...rest, transform };
+      }),
+    })),
+  };
+}
+
+/** Pinta en el preview todas las capas de `ticks`; la de arriba es `activeFrame` (la del player). */
+function composePreview(activeFrame: VideoFrame, ticks: number, requestLower: boolean): void {
+  const tl = timelineForPreview();
+  if (!tl) return;
+  const layers = resolveVideoLayers(tl, ticks);
+  const size = tl.outputResolution;
+  ctx.clearRect(0, 0, size.width, size.height);
+  const top = layers[layers.length - 1];
+  for (const layer of layers) {
+    if (layer === top || layer.clip.kind !== "clip") continue;
+    const cached = lowerLayerFrames.get(layer.trackId);
+    if (cached && cached.clipId === layer.clip.id) {
+      drawFrameFit(ctx, cached.frame, size, lookForClip(layer.clip, tl.luts), previewGradeRenderer, false, layer.transform);
+    }
+  }
+  drawFrameFit(ctx, activeFrame, size, activeLook, previewGradeRenderer, false, top?.transform);
+  if (textOverlays.length > 0) drawActiveTextOverlays(ticks);
+  if (requestLower) requestLowerLayers(ticks, layers.slice(0, -1));
+}
+
+/** Recompone con el último fotograma (p.ej. al llegar una capa de debajo, o al mover un slider de Transformar). */
+function redrawComposite(requestLower = false): void {
+  if (lastActiveFrame && !activeSegmentIsSynthetic()) composePreview(lastActiveFrame, lastActiveFrameTicks, requestLower);
+}
+
+function activeSegmentIsSynthetic(): boolean {
+  return activeSegment !== undefined && activeSegment.kind !== "clip";
+}
+
+function requestLowerLayers(ticks: number, lower: VideoLayer[]): void {
+  const needed = lower.filter((layer) => layer.clip.kind === "clip");
+  if (needed.length === 0) {
+    releaseLowerLayers();
+    return;
+  }
+  if (lowerLayerUpdate) {
+    lowerLayerPendingTicks = ticks; // ya hay una en marcha: se atiende la más reciente al acabar
+    return;
+  }
+  lowerLayerUpdate = (async () => {
+    for (const layer of needed) {
+      const entry = sources.get(layer.sourceId);
+      const useProxy = proxiesEnabled && !!entry?.proxy;
+      const demuxed = useProxy ? entry!.proxy : entry?.demuxed;
+      if (!demuxed) continue;
+      const key = `${layer.trackId}|${layer.sourceId}|${useProxy ? "proxy" : "original"}`;
+      const us = Math.round(ticksToSeconds(layer.sourceTimeTicks) * 1_000_000);
+      let reader = lowerLayerSeekers.get(key);
+      // Un FrameSeeker solo avanza: hacia atrás (scrub), uno nuevo.
+      if (!reader || us < reader.lastUs) {
+        reader?.seeker.destroy();
+        reader = { seeker: createForwardFrameSeeker(demuxed), lastUs: us };
+        lowerLayerSeekers.set(key, reader);
+      }
+      reader.lastUs = us;
+      const frame = await reader.seeker.next(us);
+      if (!frame) continue;
+      lowerLayerFrames.get(layer.trackId)?.frame.close();
+      lowerLayerFrames.set(layer.trackId, { clipId: layer.clip.id, frame });
+    }
+  })()
+    .catch((error: unknown) => console.warn("Capa inferior del preview:", error))
+    .finally(() => {
+      lowerLayerUpdate = undefined;
+      redrawComposite();
+      const pending = lowerLayerPendingTicks;
+      lowerLayerPendingTicks = undefined;
+      if (pending !== undefined && timeline) {
+        const tl = timelineForPreview()!;
+        requestLowerLayers(pending, resolveVideoLayers(tl, pending).slice(0, -1));
+      }
+    });
+}
+
+/** Al pintar algo que no es un clip (hueco, transición), la copia del último fotograma ya no vale para recomponer. */
+function forgetActiveFrame(): void {
+  lastActiveFrame?.close();
+  lastActiveFrame = undefined;
+}
+
+function releaseLowerLayers(): void {
+  for (const { frame } of lowerLayerFrames.values()) frame.close();
+  lowerLayerFrames.clear();
+  for (const { seeker } of lowerLayerSeekers.values()) seeker.destroy();
+  lowerLayerSeekers.clear();
+}
+
+// --- Panel Transformar ---
+
+const TRANSFORM_FIELDS = ["x", "y", "scale", "rotation", "opacity"] as const;
+const transformInputs = Object.fromEntries(
+  TRANSFORM_FIELDS.map((field) => [field, requireElement<HTMLInputElement>(`#tf-${field}`)]),
+) as Record<(typeof TRANSFORM_FIELDS)[number], HTMLInputElement>;
+const tfToggleKeyButton = requireElement<HTMLButtonElement>("#tf-toggle-key");
+const tfPrevKeyButton = requireElement<HTMLButtonElement>("#tf-prev-key");
+const tfNextKeyButton = requireElement<HTMLButtonElement>("#tf-next-key");
+const tfResetButton = requireElement<HTMLButtonElement>("#tf-reset");
+
+function readTransformFromForm(): ClipTransform {
+  return {
+    x: Number(transformInputs.x.value) || 0,
+    y: Number(transformInputs.y.value) || 0,
+    scale: Number(transformInputs.scale.value) || 1,
+    rotation: Number(transformInputs.rotation.value) || 0,
+    opacity: Math.max(0, Math.min(1, Number(transformInputs.opacity.value))),
+  };
+}
+
+function refreshTransformOutputs(): void {
+  const t = readTransformFromForm();
+  const fmt: Record<(typeof TRANSFORM_FIELDS)[number], string> = {
+    x: `${Math.round(t.x * 100)} %`,
+    y: `${Math.round(t.y * 100)} %`,
+    scale: `${Math.round(t.scale * 100)} %`,
+    rotation: `${t.rotation.toFixed(1).replace(/\.0$/, "")}°`,
+    opacity: `${Math.round(t.opacity * 100)} %`,
+  };
+  for (const field of TRANSFORM_FIELDS) {
+    const out = document.getElementById(`tf-${field}-val`);
+    if (out) out.textContent = fmt[field];
+  }
+}
+
+/** Instante del playhead dentro del clip (tiempo de timeline desde su inicio), acotado al clip. */
+function playheadOffsetIn(clip: Clip): number {
+  return Math.max(0, Math.min(playheadTicks - clip.startTicks, clipDurationTicks(clip)));
+}
+
+/** Pone en el panel la transformación del clip seleccionado EN EL PLAYHEAD, y el estado del botón de keyframe. */
+function syncTransformPanel(): void {
+  const found = findClipRef(selectedClip);
+  const clip = found?.clip;
+  const usable = !!clip && clip.kind === "clip" && found!.track.kind === "video";
+  for (const input of Object.values(transformInputs)) input.disabled = !usable;
+  for (const button of [tfToggleKeyButton, tfPrevKeyButton, tfNextKeyButton, tfResetButton]) button.disabled = !usable;
+  if (!usable) return;
+  const offset = playheadOffsetIn(clip!);
+  const t = transformAt(clip!, offset);
+  for (const field of TRANSFORM_FIELDS) transformInputs[field].value = String(t[field]);
+  refreshTransformOutputs();
+  const keyframes = clip!.transformKeyframes ?? [];
+  const onKey = keyframes.some((k) => k.offsetTicks === offset);
+  tfToggleKeyButton.classList.toggle("tf-key-on", onKey);
+  tfToggleKeyButton.textContent = onKey ? "◆ Quitar keyframe" : keyframes.length > 0 ? "◆ Keyframe aquí" : "◆ Animar";
+  tfPrevKeyButton.disabled = !keyframes.some((k) => k.offsetTicks < offset);
+  tfNextKeyButton.disabled = !keyframes.some((k) => k.offsetTicks > offset);
+}
+
+/** true entre el primer `input` de un slider de Transformar y su `change`. */
+let transformDragActive = false;
+
+const previewTransformLive = throttleToFrame(() => {
+  // Va un fotograma por detrás del `input`: si entretanto ya llegó el
+  // `change` (guardado), no hay que volver a poner la vista previa —
+  // se quedaría tapando para siempre lo guardado.
+  if (!transformDragActive) return;
+  const found = findClipRef(selectedClip);
+  if (!found || found.clip.kind !== "clip") return;
+  liveTransform = { clipId: found.clip.id, transform: readTransformFromForm() };
+  // Si el clip seleccionado es el que se ve, se recompone sin decodificar.
+  redrawComposite(true);
+});
+
+for (const field of TRANSFORM_FIELDS) {
+  const input = transformInputs[field];
+  input.addEventListener("input", () => {
+    transformDragActive = true;
+    refreshTransformOutputs();
+    previewTransformLive();
+  });
+  input.addEventListener("change", () => {
+    const found = findClipRef(selectedClip);
+    transformDragActive = false;
+    liveTransform = undefined;
+    if (!timeline || !found || found.clip.kind !== "clip") return;
+    commitTimeline(setClipTransformAt(timeline, found.track.id, found.clip.id, playheadOffsetIn(found.clip), readTransformFromForm()));
+    refreshTimelineLayout();
+    syncTransformPanel();
+    void seekToTimelineTicks(playheadTicks);
+  });
+}
+
+tfToggleKeyButton.addEventListener("click", () => {
+  const found = findClipRef(selectedClip);
+  if (!timeline || !found || found.clip.kind !== "clip") return;
+  commitTimeline(toggleTransformKeyframe(timeline, found.track.id, found.clip.id, playheadOffsetIn(found.clip)));
+  refreshTimelineLayout();
+  syncTransformPanel();
+  void seekToTimelineTicks(playheadTicks);
+});
+
+function jumpToTransformKeyframe(direction: 1 | -1): void {
+  const found = findClipRef(selectedClip);
+  if (!found) return;
+  const offset = playheadOffsetIn(found.clip);
+  const offsets = (found.clip.transformKeyframes ?? []).map((k) => k.offsetTicks);
+  const target = direction > 0 ? offsets.find((o) => o > offset) : [...offsets].reverse().find((o) => o < offset);
+  if (target === undefined) return;
+  void seekToTimelineTicks(found.clip.startTicks + target).then(syncTransformPanel);
+}
+tfPrevKeyButton.addEventListener("click", () => jumpToTransformKeyframe(-1));
+tfNextKeyButton.addEventListener("click", () => jumpToTransformKeyframe(1));
+
+tfResetButton.addEventListener("click", () => {
+  const found = findClipRef(selectedClip);
+  if (!timeline || !found || found.clip.kind !== "clip") return;
+  const cleared = clearTransformKeyframes(timeline, found.track.id, found.clip.id, 0);
+  commitTimeline(setClipTransformAt(cleared, found.track.id, found.clip.id, 0, IDENTITY_TRANSFORM));
+  refreshTimelineLayout();
+  syncTransformPanel();
+  void seekToTimelineTicks(playheadTicks);
+  status.textContent = "Transformación restablecida.";
+});
 
 /** Un paso de fotograma hacia delante (1) o hacia atrás (-1), según la frame rate de salida. */
 function stepFrame(direction: 1 | -1): void {
@@ -2550,6 +2817,7 @@ function selectClipRef(trackId: string, clipId: string, additive: boolean = fals
   clipColorFilterSelect.value = clip.colorFilter ?? "";
   syncClipSpeedSelect(clip);
   syncGradePanel(clip);
+  syncTransformPanel();
   trimDetails.open = true; // al seleccionar un clip, se abre solo el compartimento donde se edita
   renderTimelineSelection();
 }
@@ -5418,6 +5686,8 @@ async function applyPendingProject(project: ProjectFile, manualById: Map<string,
   }
 
   cancelProxyJobs();
+  releaseLowerLayers();
+  forgetActiveFrame();
   for (const entry of sources.values()) entry.player?.destroy();
   sources.clear();
   playerPoolOrder.length = 0;

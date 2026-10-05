@@ -1,7 +1,7 @@
 import { normalizeColorGrade, parseCubeLut, serializeCubeLut } from "./color";
 import type { FrameRate } from "./time";
 import type { TextOverlay } from "./textOverlay";
-import type { ChromaKey, Clip, ClipLut, ColorGrade, LutAsset, MasterAudio, Resolution, SourceFile, Timeline, Track, TrackKind, VolumeKeyframe } from "./types";
+import type { ChromaKey, Clip, ClipLut, ClipTransform, TransformKeyframe, ColorGrade, LutAsset, MasterAudio, Resolution, SourceFile, Timeline, Track, TrackKind, VolumeKeyframe } from "./types";
 
 /** Marcador de anotación en la timeline — no afecta al render, solo navegación. */
 export interface Marker {
@@ -162,6 +162,14 @@ interface RawClip {
   lut?: ClipLut;
   flagged?: boolean;
   speed?: number;
+  transform?: ClipTransform;
+  transformKeyframes?: TransformKeyframe[];
+}
+
+function isClipTransform(value: unknown): value is ClipTransform {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return ["x", "y", "scale", "rotation", "opacity"].every((key) => typeof v[key] === "number" && Number.isFinite(v[key]));
 }
 
 /** Acepta gradings guardados antes del 2026-10-02 (sin exposición/temperatura/curvas...) — normalizeColorGrade rellena lo que falte. */
@@ -216,7 +224,13 @@ function isRawClip(value: unknown): value is RawClip {
     (v.chromaKey === undefined || isChromaKey(v.chromaKey)) &&
     (v.lut === undefined || isClipLut(v.lut)) &&
     (v.flagged === undefined || typeof v.flagged === "boolean") &&
-    (v.speed === undefined || (typeof v.speed === "number" && Number.isFinite(v.speed) && v.speed > 0))
+    (v.speed === undefined || (typeof v.speed === "number" && Number.isFinite(v.speed) && v.speed > 0)) &&
+    (v.transform === undefined || isClipTransform(v.transform)) &&
+    (v.transformKeyframes === undefined ||
+      (Array.isArray(v.transformKeyframes) &&
+        v.transformKeyframes.every(
+          (k: unknown) => isClipTransform(k) && typeof (k as { offsetTicks?: unknown }).offsetTicks === "number",
+        )))
   );
 }
 
@@ -260,6 +274,12 @@ function migrateClipsRipple(rawClips: RawClip[]): Clip[] {
       if (raw.lut) normalized.lut = raw.lut;
       if (raw.flagged) normalized.flagged = true;
       if (raw.speed !== undefined && raw.speed !== 1) normalized.speed = raw.speed;
+      if (raw.transform) normalized.transform = { ...raw.transform };
+      if (raw.transformKeyframes && raw.transformKeyframes.length > 0) {
+        normalized.transformKeyframes = raw.transformKeyframes
+          .map((k) => ({ ...k }))
+          .sort((a, b) => a.offsetTicks - b.offsetTicks);
+      }
       clips.push(normalized);
     }
     cursor = startTicks + duration;

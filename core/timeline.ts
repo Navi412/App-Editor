@@ -1,5 +1,6 @@
 import { isIdentityCurves } from "./color";
 import { ticksToSeconds } from "./time";
+import { splitTransformKeyframes } from "./transform";
 import type {
   ChromaKey,
   Clip,
@@ -411,9 +412,18 @@ export function splitClipAt(
 
     const [firstId, secondId] = newIds;
     const sourceSplitTicks = timelineToSourceTicks(clip, timelineTicks);
-    const firstHalf: Clip = { ...clip, id: firstId, sourceOutTicks: sourceSplitTicks };
+    // La animación de transformación se reparte entre las dos mitades (con
+    // un keyframe en el corte para que no salte).
+    const split = splitTransformKeyframes(clip, timelineTicks - clip.startTicks);
+    const firstHalf: Clip = {
+      ...clip,
+      id: firstId,
+      sourceOutTicks: sourceSplitTicks,
+      ...(split.first ? { transformKeyframes: split.first } : {}),
+    };
     const secondHalf: Clip = {
       ...clip,
+      ...(split.second ? { transformKeyframes: split.second } : {}),
       id: secondId,
       sourceInTicks: sourceSplitTicks,
       // = timelineTicks a velocidad normal; con otra velocidad, el final
@@ -671,6 +681,12 @@ export function setClipSpeed(timeline: Timeline, trackId: string, clipId: string
     }
     if (clip.volumeKeyframes && oldDuration > 0) {
       updated.volumeKeyframes = clip.volumeKeyframes.map((k) => ({
+        ...k,
+        offsetTicks: Math.round((k.offsetTicks * newDuration) / oldDuration),
+      }));
+    }
+    if (clip.transformKeyframes && oldDuration > 0) {
+      updated.transformKeyframes = clip.transformKeyframes.map((k) => ({
         ...k,
         offsetTicks: Math.round((k.offsetTicks * newDuration) / oldDuration),
       }));
